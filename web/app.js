@@ -837,17 +837,10 @@ function selectNode(id) {
   const node = findNode(id);
   updatePathInputFromNode(node);
 
-  let layoutNeeded = false;
-  if (node?.kind === "module" || node?.kind === "folder" || node?.kind === "class") {
-    toggleModule(id, true);
-    layoutNeeded = true;
-  }
-
+  // Clicking a graph node only FOCUSES it. Expanding/collapsing is controlled
+  // exclusively by the +/- button (see toggleCollapse). We still auto-expand
+  // ancestor containers so the focused node is actually visible.
   if (expandParents(node)) {
-    layoutNeeded = true;
-  }
-
-  if (layoutNeeded) {
     layoutGraph();
   }
   render();
