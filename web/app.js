@@ -231,11 +231,10 @@ function stat(value, label) {
 }
 
 function renderList() {
-  const q = state.query.toLowerCase();
-  const visible = visibleNodeIds();
-  const sourceNodes = q ? state.graph.nodes.filter((node) => visible.has(node.id)) : orderedListNodes();
+  const searchTokens = searchQueryTokens(state.query);
+  const sourceNodes = searchTokens.length ? state.graph.nodes.filter(isNodeKindVisible) : orderedListNodes();
   const rows = sourceNodes
-    .filter((n) => !q || nodeSearchText(n).includes(q))
+    .filter((n) => !searchTokens.length || nodeMatchesSearch(n, searchTokens))
     .slice(0, 180)
     .map((n) => {
       const canCollapse = isCollapsibleNode(n);
@@ -247,7 +246,7 @@ function renderList() {
       return `
         <div class="node-row ${state.selectedId === n.id ? "active" : ""}" data-id="${n.id}" role="button" tabindex="0">
           <span class="swatch ${n.kind}"></span>
-          <span class="node-row-label"><strong>${escapeHtml(n.name)}</strong><small>${escapeHtml(n.kind)} - ${escapeHtml(n.metadata?.relpath || "")}</small></span>
+          <span class="node-row-label"><strong>${highlightSearchText(n.name, searchTokens)}</strong><small>${escapeHtml(n.kind)} - ${highlightSearchText(n.metadata?.relpath || "", searchTokens)}</small></span>
           ${canCollapse ? `<button class="collapse-toggle ${collapseStateClass}" data-collapse="${n.id}" title="${title}">${mark}</button>` : `<span class="collapse-spacer"></span>`}
         </div>
       `;
@@ -344,6 +343,102 @@ function listLabel(node) {
 
 function nodeSearchText(node) {
   return `${node.name} ${node.kind} ${node.metadata?.relpath || ""} ${node.metadata?.signature || ""}`.toLowerCase();
+}
+
+function searchQueryTokens(query) {
+  return String(query || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function nodeMatchesSearch(node, tokens) {
+  const text = nodeSearchText(node);
+  const compact = compactSearchText(text).text;
+  return tokens.every((token) => {
+    const compactToken = compactSearchText(token).text;
+    return text.includes(token) || (compactToken && (compact.includes(compactToken) || fuzzyIncludes(compact, compactToken)));
+  });
+}
+
+function compactSearchText(value) {
+  const chars = [];
+  const map = [];
+  const text = String(value || "").toLowerCase();
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (/[\s_\-./\\:()[\]{}"'`,;]+/.test(char)) continue;
+    chars.push(char);
+    map.push(index);
+  }
+  return { text: chars.join(""), map };
+}
+
+function fuzzyIncludes(text, token) {
+  if (!token) return true;
+  let index = 0;
+  for (const char of text) {
+    if (char === token[index]) index += 1;
+    if (index === token.length) return true;
+  }
+  return false;
+}
+
+function highlightSearchText(value, tokens) {
+  const text = String(value || "");
+  if (!tokens.length || !text) return escapeHtml(text);
+  const marks = new Array(text.length).fill(false);
+  const lower = text.toLowerCase();
+  for (const token of tokens) {
+    markExactMatches(lower, token, marks);
+    const compact = compactSearchText(text);
+    const compactToken = compactSearchText(token).text;
+    markFuzzyMatch(compact, compactToken, marks);
+  }
+  return markedHtml(text, marks);
+}
+
+function markExactMatches(text, token, marks) {
+  if (!token) return;
+  let start = text.indexOf(token);
+  while (start !== -1) {
+    for (let index = start; index < start + token.length; index += 1) {
+      marks[index] = true;
+    }
+    start = text.indexOf(token, start + 1);
+  }
+}
+
+function markFuzzyMatch(compact, token, marks) {
+  if (!token) return;
+  let tokenIndex = 0;
+  const matchedIndexes = [];
+  for (let index = 0; index < compact.text.length; index += 1) {
+    if (compact.text[index] !== token[tokenIndex]) continue;
+    matchedIndexes.push(compact.map[index]);
+    tokenIndex += 1;
+    if (tokenIndex === token.length) break;
+  }
+  if (tokenIndex !== token.length) return;
+  for (const index of matchedIndexes) marks[index] = true;
+}
+
+function markedHtml(text, marks) {
+  let html = "";
+  let open = false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (marks[index] && !open) {
+      html += `<mark class="search-hit">`;
+      open = true;
+    } else if (!marks[index] && open) {
+      html += `</mark>`;
+      open = false;
+    }
+    html += escapeHtml(text[index]);
+  }
+  if (open) html += `</mark>`;
+  return html;
 }
 
 function renderNodes() {
@@ -498,7 +593,6 @@ function renderMockPanel(selectedId) {
             <strong>${escapeHtml(step.title)}</strong>
             <div>${escapeHtml(step.detail)}</div>
             ${index === state.mock.step ? fields : ""}
-            ${index === state.mock.step ? `<button class="run-step-button" data-run-step="${index}">Run Step</button>` : ""}
             ${result}
           </div>
         </div>
@@ -507,10 +601,11 @@ function renderMockPanel(selectedId) {
     .join("");
   const hasPrevStep = state.mock.step > 0;
   const hasNextStep = state.mock.step < state.mock.steps.length - 1;
-  const mockControls = hasPrevStep || hasNextStep
+  const hasRunnableStep = state.mock.steps.length > 0;
+  const mockControls = hasPrevStep || hasRunnableStep
     ? [
         hasPrevStep ? `<button id="mockPrevButton">Prev</button>` : `<span class="mock-control-spacer"></span>`,
-        hasNextStep ? `<button id="mockNextButton">Next</button>` : `<span class="mock-control-spacer"></span>`,
+        hasRunnableStep ? `<button id="mockNextButton">${hasNextStep ? "Next" : "Run Step"}</button>` : `<span class="mock-control-spacer"></span>`,
       ].join("")
     : "";
   els.mockBody.innerHTML = `
@@ -1244,11 +1339,6 @@ document.addEventListener("click", async (event) => {
   }
   if (event.target.closest("#mockNextButton")) {
     await nextMockStep();
-    return;
-  }
-  const runStep = event.target.closest("[data-run-step]");
-  if (runStep) {
-    runMockStep(Number(runStep.dataset.runStep));
     return;
   }
   const collapse = event.target.closest("[data-collapse]");

@@ -8,6 +8,7 @@ import importlib.util
 import inspect
 import ast
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -567,6 +568,7 @@ class Api:
             return {"ok": False, "error": str(exc)}
 
     def run_python_mock(self, request: dict[str, Any]) -> dict[str, Any]:
+        diagnostics: list[str] = []
         try:
             project_root = Path(request["projectRoot"]).resolve()
             relpath = str(request["relpath"])
@@ -576,6 +578,10 @@ class Api:
             owner_args = request.get("ownerArgs", {})
             owner_class = str(request.get("ownerClass", ""))
             file_path = (project_root / relpath).resolve()
+            self._mock_log(
+                diagnostics,
+                f"request kind={kind} symbol={symbol_name} ownerClass={owner_class or '-'} relpath={relpath}",
+            )
             try:
                 file_path.relative_to(project_root)
             except ValueError:
@@ -584,25 +590,35 @@ class Api:
                 raise ValueError("Quick Mock execution currently supports Python files only.")
             if not file_path.exists():
                 raise ValueError(f"Python file does not exist: {file_path}")
+            if symbol_name == "main" and kind == "function" and not args and not owner_args and not owner_class:
+                self._mock_log(diagnostics, "launching main entrypoint in a subprocess")
+                return self._launch_python_entrypoint(project_root, file_path)
 
             previous_cwd = Path.cwd()
             os.chdir(project_root)
+            self._mock_log(diagnostics, f"cwd changed {previous_cwd} -> {project_root}")
             try:
                 target = None
                 module = None
                 load_error: Exception | None = None
                 try:
+                    self._mock_log(diagnostics, f"loading module from {file_path}")
                     module = self._load_python_module(project_root, file_path)
+                    self._mock_log(diagnostics, f"module loaded as {getattr(module, '__name__', '<unknown>')}")
                     target = getattr(module, symbol_name, None)
+                    self._mock_log(diagnostics, f"top-level target lookup: {'hit' if target is not None else 'miss'}")
                     if target is None:
                         target = self._find_class_member(module, symbol_name)
+                        self._mock_log(diagnostics, f"class member lookup: {'hit' if target is not None else 'miss'}")
                 except ModuleNotFoundError as exc:
                     load_error = exc
+                    self._mock_log(diagnostics, f"module load failed: {exc}; falling back to isolated symbol load")
                     target = self._load_isolated_python_symbol(file_path, symbol_name)
                 if target is None:
                     detail = f" Load failed first: {load_error}" if load_error else ""
                     raise ValueError(f"{symbol_name} is not a top-level symbol or class member in {relpath}.{detail}")
                 if owner_class and kind in {"function", "method"}:
+                    self._mock_log(diagnostics, f"building owner instance {owner_class}")
                     owner = getattr(module, owner_class, None) if module else None
                     if owner is None:
                         owner = self._load_isolated_python_symbol(file_path, owner_class)
@@ -612,22 +628,67 @@ class Api:
                         name: self._coerce_mock_value(value.get("value"), value.get("type", ""), module)
                         for name, value in owner_args.items()
                     }
+                    self._mock_log(diagnostics, f"owner kwargs={self._safe_repr(owner_kwargs)}")
                     target = getattr(owner(**owner_kwargs), symbol_name)
+                    self._mock_log(diagnostics, f"bound method target={self._safe_repr(target)}")
 
                 kwargs = {
                     name: self._coerce_mock_value(value.get("value"), value.get("type", ""), module)
                     for name, value in args.items()
                     if name not in {"self", "cls"}
                 }
+                self._mock_log(diagnostics, f"call kwargs={self._safe_repr(kwargs)}")
                 if kind == "class":
                     result = target(**kwargs)
                 else:
                     result = target(**kwargs)
+                self._mock_log(diagnostics, f"result type={type(result).__name__} value={self._safe_repr(result)}")
             finally:
                 os.chdir(previous_cwd)
-            return {"ok": True, "result": repr(result), "resultType": type(result).__name__}
+                self._mock_log(diagnostics, f"cwd restored to {previous_cwd}")
+            return {
+                "ok": True,
+                "result": f"{repr(result)}\n\nDiagnostics:\n" + "\n".join(diagnostics),
+                "resultType": type(result).__name__,
+            }
         except Exception as exc:
-            return {"ok": False, "error": f"{exc}\n{traceback.format_exc()}"}
+            self._mock_log(diagnostics, f"error {type(exc).__name__}: {exc}")
+            return {"ok": False, "error": f"{exc}\n{traceback.format_exc()}\nDiagnostics:\n" + "\n".join(diagnostics)}
+
+    def _mock_log(self, diagnostics: list[str], message: str) -> None:
+        diagnostics.append(message)
+        try:
+            log_dir = ROOT / ".uide_cache"
+            log_dir.mkdir(exist_ok=True)
+            with (log_dir / "quick_mock.log").open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        except Exception:
+            pass
+
+    def _safe_repr(self, value: Any, limit: int = 500) -> str:
+        try:
+            text = repr(value)
+        except Exception as exc:
+            text = f"<repr failed: {exc}>"
+        return text if len(text) <= limit else text[:limit] + "..."
+
+    def _launch_python_entrypoint(self, project_root: Path, file_path: Path) -> dict[str, Any]:
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        python_paths = [str(project_root), str(project_root.parent)]
+        if existing_pythonpath:
+            python_paths.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(python_paths)
+        process = subprocess.Popen(
+            [sys.executable, str(file_path)],
+            cwd=project_root,
+            env=env,
+        )
+        return {
+            "ok": True,
+            "result": f"Started {file_path.name} with PID {process.pid}",
+            "resultType": "process",
+        }
 
     def _load_python_module(self, project_root: Path, file_path: Path):
         module_name = f"_uide_mock_{abs(hash(str(file_path)))}"

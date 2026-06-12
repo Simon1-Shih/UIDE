@@ -335,6 +335,12 @@ h1 {
   white-space: nowrap;
 }
 
+.search-hit {
+  border-radius: 3px;
+  background: rgba(255, 209, 102, 0.26);
+  color: #ffe39a;
+}
+
 .collapse-toggle {
   width: 28px;
   min-height: 28px;
@@ -829,12 +835,6 @@ h1 {
 
 .mock-form input {
   padding: 7px 8px;
-}
-
-.run-step-button {
-  width: 100%;
-  margin-top: 8px;
-  min-height: 32px;
 }
 
 .mock-result {
