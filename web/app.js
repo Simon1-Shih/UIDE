@@ -12,6 +12,12 @@ const state = {
   mock: null,
   resizing: null,
   loadedConfig: null,
+  kindFilters: {
+    import: true,
+    class: true,
+    function: true,
+    method: true,
+  },
 };
 
 const MAX_RENDER_NODES = 360;
@@ -22,6 +28,7 @@ const els = {
   chooseButton: document.querySelector("#chooseButton"),
   stats: document.querySelector("#stats"),
   searchInput: document.querySelector("#searchInput"),
+  kindFilters: document.querySelectorAll("[data-kind-filter]"),
   nodeList: document.querySelector("#nodeList"),
   graph: document.querySelector("#graph"),
   nodes: document.querySelector("#nodes"),
@@ -88,6 +95,7 @@ function color(kind) {
     module: "var(--gold)",
     class: "var(--green)",
     function: "var(--blue)",
+    method: "#8fd3ff",
     import: "var(--violet)",
   }[kind] || "var(--muted)";
 }
@@ -125,9 +133,10 @@ function layoutGraph() {
     module: nodes.filter((n) => n.kind === "module"),
     class: nodes.filter((n) => n.kind === "class"),
     function: nodes.filter((n) => n.kind === "function"),
+    method: nodes.filter((n) => n.kind === "method"),
     import: nodes.filter((n) => n.kind === "import"),
   };
-  const layerOrder = ["project", "folder", "module", "class", "function", "import"];
+  const layerOrder = ["project", "folder", "module", "class", "method", "function", "import"];
   const centerY = Math.max(260, rect.height / 2);
   const startX = 80;
   const gapX = Math.max(190, (rect.width - 220) / Math.max(1, layerOrder.length - 1));
@@ -148,7 +157,14 @@ function layoutGraph() {
 
 function visibleNodeIds() {
   if (!state.graph) return new Set();
-  return new Set(state.graph.nodes.filter((node) => !isNodeHiddenByCollapse(node)).map((node) => node.id));
+  return new Set(state.graph.nodes.filter((node) => isNodeKindVisible(node) && !isNodeHiddenByCollapse(node)).map((node) => node.id));
+}
+
+function isNodeKindVisible(node) {
+  if (Object.prototype.hasOwnProperty.call(state.kindFilters, node.kind)) {
+    return state.kindFilters[node.kind];
+  }
+  return true;
 }
 
 function isNodeHiddenByCollapse(node) {
@@ -165,7 +181,12 @@ function isNodeHiddenByCollapse(node) {
 
   // If the node is not a module, check if its file is collapsed
   if (node.kind !== "module") {
-    return state.collapsed.has(`file:${relpath}`);
+    if (state.collapsed.has(`file:${relpath}`)) return true;
+  }
+
+  if (node.kind === "method" && node.metadata?.ownerClass) {
+    const classId = `class:${relpath}:${node.metadata.ownerClass}`;
+    if (state.collapsed.has(classId)) return true;
   }
 
   return false;
@@ -211,14 +232,14 @@ function stat(value, label) {
 function renderList() {
   const q = state.query.toLowerCase();
   const visible = visibleNodeIds();
-  const sourceNodes = q ? state.graph.nodes : state.graph.nodes.filter((n) => visible.has(n.id) && state.renderIds.has(n.id));
+  const sourceNodes = q ? state.graph.nodes.filter((node) => visible.has(node.id)) : orderedListNodes();
   const rows = sourceNodes
     .filter((n) => !q || nodeSearchText(n).includes(q))
     .slice(0, 180)
     .map((n) => {
-      const canCollapse = n.kind === "module" || n.kind === "folder";
+      const canCollapse = isCollapsibleNode(n);
       const mark = state.collapsed.has(n.id) ? "+" : "-";
-      const title = n.kind === "folder" ? "Collapse folder" : "Collapse module";
+      const title = n.kind === "folder" ? "Collapse folder" : n.kind === "class" ? "Collapse class" : "Collapse module";
       return `
         <div class="node-row ${state.selectedId === n.id ? "active" : ""}" data-id="${n.id}" role="button" tabindex="0">
           <span class="swatch ${n.kind}"></span>
@@ -229,6 +250,92 @@ function renderList() {
     })
     .join("");
   els.nodeList.innerHTML = rows || `<div class="empty">No matching nodes.</div>`;
+}
+
+function isCollapsibleNode(node) {
+  return Boolean(node && ["folder", "module", "class"].includes(node.kind));
+}
+
+function orderedListNodes() {
+  const visible = visibleNodeIds();
+  const nodesById = new Map(state.graph.nodes.map((node) => [node.id, node]));
+  const childrenByParent = new Map();
+  for (const edge of state.graph.edges) {
+    if (edge.kind !== "contains") continue;
+    if (!childrenByParent.has(edge.source)) childrenByParent.set(edge.source, []);
+    childrenByParent.get(edge.source).push(edge.target);
+  }
+
+  const ordered = [];
+  const visited = new Set();
+  const walk = (id) => {
+    if (visited.has(id) || !visible.has(id)) return;
+    const node = nodesById.get(id);
+    if (!node) return;
+    visited.add(id);
+    ordered.push(node);
+    for (const childId of orderedChildIds(id, childrenByParent, nodesById)) {
+      walk(childId);
+    }
+  };
+
+  walk("project");
+  for (const node of state.graph.nodes) {
+    walk(node.id);
+  }
+  return ordered;
+}
+
+function orderedChildIds(parentId, childrenByParent, nodesById) {
+  const children = (childrenByParent.get(parentId) || [])
+    .map((id) => nodesById.get(id))
+    .filter(Boolean);
+  const parent = nodesById.get(parentId);
+  if (parent?.kind === "module") return orderedModuleChildIds(children);
+  return children.sort(compareSiblingNodes).map((node) => node.id);
+}
+
+function orderedModuleChildIds(children) {
+  const classes = children.filter((node) => node.kind === "class").sort(compareSiblingNodes);
+  const classNames = new Set(classes.map((node) => node.name));
+  const methodsByClass = new Map();
+  const freeFunctions = [];
+  const rest = [];
+
+  for (const node of children) {
+    if (node.kind === "class") continue;
+    if (node.kind === "method" && node.metadata?.ownerClass && classNames.has(node.metadata.ownerClass)) {
+      if (!methodsByClass.has(node.metadata.ownerClass)) methodsByClass.set(node.metadata.ownerClass, []);
+      methodsByClass.get(node.metadata.ownerClass).push(node);
+    } else if (node.kind === "function") {
+      freeFunctions.push(node);
+    } else {
+      rest.push(node);
+    }
+  }
+
+  const ordered = [];
+  for (const classNode of classes) {
+    ordered.push(classNode);
+    ordered.push(...(methodsByClass.get(classNode.name) || []).sort(compareSiblingNodes));
+  }
+  ordered.push(...freeFunctions.sort(compareSiblingNodes));
+  ordered.push(...rest.sort(compareSiblingNodes));
+  return ordered.map((node) => node.id);
+}
+
+function compareSiblingNodes(a, b) {
+  const priority = { folder: 0, module: 1, class: 2, method: 3, function: 4, import: 5, project: 6 };
+  const priorityDiff = (priority[a.kind] ?? 9) - (priority[b.kind] ?? 9);
+  if (priorityDiff) return priorityDiff;
+  const lineDiff = (a.metadata?.line || 0) - (b.metadata?.line || 0);
+  if (lineDiff) return lineDiff;
+  return listLabel(a).localeCompare(listLabel(b), undefined, { sensitivity: "base" });
+}
+
+function listLabel(node) {
+  if (node.kind === "folder" && node.metadata?.relpath === ".") return "./";
+  return node.metadata?.relpath || node.name || node.id;
 }
 
 function nodeSearchText(node) {
@@ -256,9 +363,13 @@ function renderNodes() {
     el.style.left = `${screenX(pos.x)}px`;
     el.style.top = `${screenY(pos.y)}px`;
     el.style.transform = `translateZ(${depthFor(n.kind)}px) scale(${state.zoom})`;
+    const collapseButton = isCollapsibleNode(n)
+      ? `<button class="node-collapse-toggle" data-collapse="${escapeHtml(n.id)}" title="${state.collapsed.has(n.id) ? "Expand" : "Collapse"}">${state.collapsed.has(n.id) ? "+" : "-"}</button>`
+      : "";
     el.innerHTML = `
       <span class="node-orb kind-${n.kind}"></span>
       <span><strong>${escapeHtml(n.name)}</strong><small>${escapeHtml(n.kind)}</small></span>
+      ${collapseButton}
     `;
     els.nodes.appendChild(el);
   }
@@ -299,8 +410,10 @@ function renderInspector() {
   els.selectedKind.textContent = selected.kind;
   els.selectedName.textContent = selected.name;
   els.selectedPath.textContent = selected.metadata?.relpath || selected.metadata?.path || "";
-  els.outgoing.innerHTML = relationRows(state.graph.edges.filter((e) => e.source === selected.id), "target");
-  els.incoming.innerHTML = relationRows(state.graph.edges.filter((e) => e.target === selected.id), "source");
+  els.outgoing.innerHTML = relationRows(state.graph.edges.filter((e) => e.source === selected.id && isEdgeKindVisible(e)), "target");
+  els.incoming.innerHTML = relationRows(state.graph.edges.filter((e) => e.target === selected.id && isEdgeKindVisible(e)), "source");
+  els.mockButton.disabled = !isMockableNode(selected);
+  els.mockButton.title = isMockableNode(selected) ? "Build a Python mock input form" : "Quick Mock supports Python functions and classes only";
   renderMockPanel(selected.id);
   els.contextSeed.textContent = JSON.stringify(buildContext(selected.id), null, 2);
 }
@@ -322,13 +435,17 @@ function activeMockEdgeIds() {
 
 function renderMockPanel(selectedId) {
   if (!els.mockBody) return;
+  const selected = findNode(selectedId);
   if (!state.mock || state.mock.nodeId !== selectedId) {
-    els.mockBody.innerHTML = `<div class="mock-summary">Trace this node to infer the upstream objects and input values needed for a quick mock.</div>`;
+    const message = isMockableNode(selected)
+      ? "Build a form for this Python target's direct inputs."
+      : "Quick Mock is available for Python classes, methods, and functions only.";
+    els.mockBody.innerHTML = `<div class="mock-summary">${message}</div>`;
     return;
   }
   const steps = state.mock.steps
     .map((step, index) => {
-      const fields = step.params.length ? renderMockFields(step) : `<div class="mock-fill">No parameters required.</div>`;
+      const fields = hasMockFields(step) ? renderMockFields(step) : `<div class="mock-fill">No parameters required.</div>`;
       const result = step.result ? `<div class="mock-result ${step.result.ok ? "ok" : "error"}">${escapeHtml(step.result.text)}</div>` : "";
       return `
         <div class="mock-step ${index <= state.mock.step ? "active" : ""}">
@@ -355,28 +472,46 @@ function renderMockPanel(selectedId) {
 }
 
 function renderMockFields(step) {
+  const ownerFields = (step.ownerParams || []).flatMap(flattenParamSpec);
+  const targetFields = (step.params || []).flatMap(flattenParamSpec);
   return `
     <div class="mock-form">
-      ${step.params
-        .map((param) => {
-          const value = step.values[param.name] ?? defaultValueFor(param.name, param.type);
-          return `
-            <label>
-              <span>${escapeHtml(param.name)}${param.type ? `: ${escapeHtml(param.type)}` : ""}</span>
-              <input data-mock-param="${escapeHtml(param.name)}" value="${escapeHtml(value)}" />
-            </label>
-          `;
-        })
-        .join("")}
+      ${ownerFields.length ? `<div class="mock-fill">self: ${escapeHtml(step.node.metadata.ownerClass)}</div>${renderMockInputs(ownerFields, "owner")}` : ""}
+      ${targetFields.length ? renderMockInputs(targetFields, "target") : ""}
     </div>
   `;
+}
+
+function renderMockInputs(fields, scope) {
+  return fields
+    .map((param) => {
+      const value = paramValuesForScope(scope)[param.path] ?? defaultValueFor(param.name, param.type);
+      return `
+        <label>
+          <span>${escapeHtml(param.path)}${param.type ? `: ${escapeHtml(param.type)}` : ""}</span>
+          <input data-mock-scope="${scope}" data-mock-param="${escapeHtml(param.path)}" value="${escapeHtml(value)}" />
+        </label>
+      `;
+    })
+    .join("");
+}
+
+function paramValuesForScope(scope) {
+  if (!state.mock) return {};
+  const step = state.mock.steps[state.mock.step];
+  if (!step) return {};
+  return scope === "owner" ? step.ownerValues : step.values;
+}
+
+function hasMockFields(step) {
+  return Boolean((step.params || []).flatMap(flattenParamSpec).length || (step.ownerParams || []).flatMap(flattenParamSpec).length);
 }
 
 function updateRenderScope() {
   const neighbors = relatedIds(state.selectedId);
   const mockNodeIds = new Set(state.mock?.steps.map((step) => step.nodeId) || []);
   const visible = visibleNodeIds();
-  const kindScore = { project: 60, folder: 50, module: 40, class: 30, function: 20, import: 10 };
+  const kindScore = { project: 70, folder: 60, module: 50, class: 40, method: 30, function: 20, import: 10 };
   const ranked = state.graph.nodes
     .filter((node) => visible.has(node.id))
     .map((node, index) => {
@@ -406,38 +541,33 @@ function relationRows(edges, direction) {
 function buildMockPlan(nodeId) {
   const selected = findNode(nodeId);
   if (!selected) return null;
-  const trace = traceMockPath(nodeId);
-  const steps = trace.map((item, index) => {
-    const node = findNode(item.nodeId);
-    return {
-      nodeId: item.nodeId,
-      edgeId: item.edgeId,
-      node,
-      title: index === trace.length - 1 ? `Mock target: ${node?.name || item.nodeId}` : `Prepare ${node?.name || item.nodeId}`,
-      detail: mockDetailFor(node, item.edge),
-      params: mockParamsFor(node),
-      values: {},
-      result: null,
-    };
-  });
-  if (!steps.length) {
-    steps.push({
+  if (!isMockableNode(selected)) return null;
+  const steps = [
+    {
       nodeId,
       edgeId: null,
       node: selected,
       title: `Mock target: ${selected.name}`,
       detail: mockDetailFor(selected, null),
       params: mockParamsFor(selected),
+      ownerParams: mockOwnerParamsFor(selected),
       values: {},
+      ownerValues: {},
       result: null,
-    });
-  }
+    },
+  ];
   return {
     nodeId,
     step: 0,
     steps,
-    summary: `Found ${steps.length} step${steps.length === 1 ? "" : "s"} to prepare ${selected.name}. Use Next to animate data flowing into the target.`,
+    summary: `Prepare direct inputs for ${selected.name}. Wrapper classes are expanded to primitive fields when UIDE can infer their constructors.`,
   };
+}
+
+function isEdgeKindVisible(edge) {
+  const source = findNode(edge.source);
+  const target = findNode(edge.target);
+  return Boolean(source && target && isNodeKindVisible(source) && isNodeKindVisible(target));
 }
 
 function traceMockPath(nodeId) {
@@ -469,18 +599,67 @@ function preferredUpstreamEdge(nodeId, visited) {
 
 function mockDetailFor(node, edge) {
   if (!node) return "Unknown node.";
-  const via = edge ? ` via ${edge.kind}` : "";
-  if (node.kind === "class") return `Create a test double for this class${via}.`;
-  if (node.kind === "function") return `Call or stub this function${via}.`;
-  if (node.kind === "module") return `Import this module boundary${via}.`;
-  if (node.kind === "import") return `Provide a replacement for this dependency${via}.`;
-  return `Prepare this ${node.kind}${via}.`;
+  if (node.kind === "class") return "Instantiate this Python class with constructor inputs.";
+  if (node.kind === "method") return `Instantiate ${node.metadata.ownerClass}, then call this method.`;
+  return "Call this Python function with direct inputs.";
 }
 
 function mockParamsFor(node) {
   if (!node) return [];
-  const signature = node.metadata?.signature || "";
-  return extractParams(signature).filter((param) => !["self", "cls"].includes(param.name));
+  const params = node.metadata?.params || extractParams(node.metadata?.signature || "");
+  return params.filter(isUserParam).map((param) => expandParamSpec(param));
+}
+
+function mockOwnerParamsFor(node) {
+  if (!node?.metadata?.isMethod) return [];
+  return (node.metadata.ownerParams || []).filter(isUserParam).map((param) => expandParamSpec(param));
+}
+
+function isUserParam(param) {
+  return param?.name && !["self", "cls"].includes(param.name);
+}
+
+function expandParamSpec(param, path = param.name, seen = new Set()) {
+  const type = normalizeType(param.type);
+  const classNode = findClassNode(type);
+  if (!classNode || isPrimitiveType(type) || seen.has(type)) {
+    return { ...param, path, type, fields: [] };
+  }
+  const nextSeen = new Set(seen);
+  nextSeen.add(type);
+  const fields = (classNode.metadata?.params || [])
+    .filter(isUserParam)
+    .map((child) => expandParamSpec(child, `${path}.${child.name}`, nextSeen));
+  return { ...param, path, type, fields };
+}
+
+function flattenParamSpec(param) {
+  if (!param.fields?.length) return [param];
+  return param.fields.flatMap(flattenParamSpec);
+}
+
+function findClassNode(type) {
+  if (!type || !state.graph) return null;
+  return state.graph.nodes.find((node) => node.kind === "class" && node.name === type);
+}
+
+function isMockableNode(node) {
+  return Boolean(node && ["function", "method", "class"].includes(node.kind) && node.metadata?.relpath?.endsWith(".py"));
+}
+
+function normalizeType(type) {
+  return String(type || "")
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/^Optional\[(.*)\]$/, "$1")
+    .replace(/^typing\.Optional\[(.*)\]$/, "$1")
+    .replace(/\s*\|\s*None$/, "")
+    .trim();
+}
+
+function isPrimitiveType(type) {
+  const normalized = normalizeType(type).toLowerCase();
+  if (!normalized) return true;
+  return ["str", "int", "float", "bool", "bytes", "dict", "list", "tuple", "set", "any"].includes(normalized);
 }
 
 function extractParams(signature) {
@@ -523,8 +702,8 @@ function buildContext(id) {
   const neighborhood = relatedIds(id);
   return {
     selected,
-    nearbyNodes: state.graph.nodes.filter((n) => neighborhood.has(n.id)),
-    relationships: state.graph.edges.filter((e) => neighborhood.has(e.source) && neighborhood.has(e.target)),
+    nearbyNodes: state.graph.nodes.filter((n) => neighborhood.has(n.id) && isNodeKindVisible(n)),
+    relationships: state.graph.edges.filter((e) => neighborhood.has(e.source) && neighborhood.has(e.target) && isEdgeKindVisible(e)),
   };
 }
 
@@ -543,16 +722,17 @@ function screenY(y) {
 }
 
 function depthFor(kind) {
-  return { project: 58, folder: 46, module: 34, class: 24, function: 14, import: 6 }[kind] || 0;
+  return { project: 64, folder: 54, module: 44, class: 34, method: 24, function: 14, import: 6 }[kind] || 0;
 }
 
 function selectNode(id) {
   if (state.selectedId !== id) state.mock = null;
   state.selectedId = id;
   const node = findNode(id);
+  updatePathInputFromNode(node);
 
   let layoutNeeded = false;
-  if (node?.kind === "module" || node?.kind === "folder") {
+  if (node?.kind === "module" || node?.kind === "folder" || node?.kind === "class") {
     toggleModule(id, true);
     layoutNeeded = true;
   }
@@ -567,8 +747,17 @@ function selectNode(id) {
   render();
 }
 
+function updatePathInputFromNode(node) {
+  if (!node || !["project", "folder"].includes(node.kind)) return;
+  const selectedPath = node.metadata?.path || (node.kind === "project" ? state.graph?.root : "");
+  if (selectedPath) {
+    els.pathInput.value = selectedPath;
+  }
+}
+
 function expandParents(node) {
   if (!node) return false;
+  if (node.kind === "folder") return false;
   let changed = false;
 
   const relpath = node.metadata?.relpath;
@@ -578,6 +767,13 @@ function expandParents(node) {
       const moduleId = `file:${relpath}`;
       if (state.collapsed.has(moduleId)) {
         state.collapsed.delete(moduleId);
+        changed = true;
+      }
+    }
+    if (node.kind === "method" && node.metadata?.ownerClass) {
+      const classId = `class:${relpath}:${node.metadata.ownerClass}`;
+      if (state.collapsed.has(classId)) {
+        state.collapsed.delete(classId);
         changed = true;
       }
     }
@@ -622,9 +818,45 @@ async function saveCollapsedConfig() {
   });
 }
 
+function applyKindFilterConfig() {
+  const savedFilters = state.loadedConfig?.kind_filters;
+  if (savedFilters && typeof savedFilters === "object") {
+    for (const kind of Object.keys(state.kindFilters)) {
+      if (typeof savedFilters[kind] === "boolean") {
+        state.kindFilters[kind] = savedFilters[kind];
+      }
+    }
+  }
+  els.kindFilters.forEach((input) => {
+    input.checked = state.kindFilters[input.dataset.kindFilter] !== false;
+  });
+}
+
+async function saveKindFilterConfig() {
+  if (!window.pywebview?.api) return;
+  if (!state.loadedConfig) state.loadedConfig = {};
+  state.loadedConfig.kind_filters = { ...state.kindFilters };
+  try {
+    await window.pywebview.api.update_config({
+      kind_filters: state.loadedConfig.kind_filters,
+    });
+  } catch {
+    // The filter should still update immediately even if config persistence fails.
+  }
+}
+
 function startMockTrace() {
   if (!state.selectedId || !state.graph) return;
   state.mock = buildMockPlan(state.selectedId);
+  if (!state.mock) {
+    const selected = findNode(state.selectedId);
+    state.mock = {
+      nodeId: state.selectedId,
+      step: 0,
+      steps: [],
+      summary: `${selected?.name || "This node"} is not a Python class, method, or function.`,
+    };
+  }
   render();
 }
 
@@ -637,8 +869,8 @@ function stepMock(delta) {
 async function runMockStep(index) {
   if (!state.mock || !window.pywebview?.api) return;
   const step = state.mock.steps[index];
-  if (!step?.node || !["function", "class"].includes(step.node.kind)) {
-    step.result = { ok: false, text: "This step is not directly executable. Select a Python class or top-level function." };
+  if (!step?.node || !["function", "method", "class"].includes(step.node.kind)) {
+    step.result = { ok: false, text: "This step is not directly executable. Select a Python class, method, or top-level function." };
     render();
     return;
   }
@@ -649,17 +881,17 @@ async function runMockStep(index) {
   }
   const inputs = document.querySelectorAll(`[data-mock-param]`);
   step.values = {};
+  step.ownerValues = {};
   inputs.forEach((input) => {
     const param = input.dataset.mockParam;
-    step.values[param] = input.value;
+    if (input.dataset.mockScope === "owner") {
+      step.ownerValues[param] = input.value;
+    } else {
+      step.values[param] = input.value;
+    }
   });
-  const args = {};
-  for (const param of step.params) {
-    args[param.name] = {
-      value: step.values[param.name] ?? defaultValueFor(param.name, param.type),
-      type: param.type,
-    };
-  }
+  const args = materializeArgs(step.params, step.values);
+  const ownerArgs = materializeArgs(step.ownerParams || [], step.ownerValues);
   step.result = { ok: true, text: "Running..." };
   render();
   const result = await window.pywebview.api.run_python_mock({
@@ -667,12 +899,43 @@ async function runMockStep(index) {
     relpath: step.node.metadata.relpath,
     symbolName: step.node.name,
     kind: step.node.kind,
+    ownerClass: step.node.metadata?.ownerClass || "",
     args,
+    ownerArgs,
   });
   step.result = result.ok
     ? { ok: true, text: `${result.resultType}: ${result.result}` }
     : { ok: false, text: result.error || "Execution failed." };
   render();
+}
+
+function materializeArgs(params, values) {
+  const args = {};
+  for (const param of params || []) {
+    args[param.name] = {
+      value: materializeParamValue(param, values),
+      type: param.type,
+    };
+  }
+  return args;
+}
+
+function materializeParamValue(param, values) {
+  if (!param.fields?.length) {
+    return values[param.path] ?? defaultValueFor(param.name, param.type);
+  }
+  return JSON.stringify(materializeObjectFields(param, values));
+}
+
+function materializeObjectFields(param, values) {
+  const result = {};
+  for (const field of param.fields || []) {
+    const key = field.path.split(".").at(-1);
+    result[key] = field.fields?.length
+      ? materializeObjectFields(field, values)
+      : values[field.path] ?? defaultValueFor(field.name, field.type);
+  }
+  return result;
 }
 
 function toggleCollapse(id) {
@@ -694,6 +957,7 @@ async function scanPath(path) {
       // First, fetch config if we haven't already
       if (!state.loadedConfig) {
         state.loadedConfig = await window.pywebview.api.get_config();
+        applyKindFilterConfig();
         // Apply width configs
         if (state.loadedConfig.left_width) {
           document.documentElement.style.setProperty("--left-width", `${state.loadedConfig.left_width}px`);
@@ -734,6 +998,23 @@ els.chooseButton.addEventListener("click", async () => {
 els.searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
   render();
+});
+applyKindFilterConfig();
+els.kindFilters.forEach((input) => {
+  input.addEventListener("change", async () => {
+    state.kindFilters[input.dataset.kindFilter] = input.checked;
+    await saveKindFilterConfig();
+    if (state.selectedId) {
+      const selected = findNode(state.selectedId);
+      if (selected && !isNodeKindVisible(selected)) {
+        state.selectedId = null;
+        state.mock = null;
+      }
+    }
+    if (!state.graph) return;
+    layoutGraph();
+    render();
+  });
 });
 els.fitButton.addEventListener("click", () => {
   if (!state.graph) return;
@@ -833,6 +1114,7 @@ els.graph.addEventListener("wheel", (event) => {
 
 els.nodes.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return;
+  if (event.target.closest("[data-collapse]")) return;
   const target = event.target.closest(".node");
   if (!target) return;
   const id = target.dataset.id;

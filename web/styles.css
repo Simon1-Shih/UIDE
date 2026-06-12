@@ -14,6 +14,8 @@
   --violet: #a78bfa;
   --left-width: 310px;
   --right-width: 340px;
+  --left-track: clamp(220px, var(--left-width), 34vw);
+  --right-track: clamp(260px, var(--right-width), 38vw);
 }
 
 * {
@@ -65,12 +67,16 @@ input:focus {
 }
 
 #app {
+  isolation: isolate;
   display: grid;
-  grid-template-columns: var(--left-width) 6px minmax(360px, 1fr) 6px var(--right-width);
+  grid-template-columns: var(--left-track) 6px minmax(0, 1fr) 6px var(--right-track);
   height: 100vh;
+  min-width: 0;
 }
 
 .column-resizer {
+  position: relative;
+  z-index: 4;
   background: rgba(255, 255, 255, 0.06);
   cursor: col-resize;
 }
@@ -88,7 +94,7 @@ input:focus {
   min-width: 0;
   min-height: 0;
   padding: 18px;
-  background: rgba(23, 27, 33, 0.92);
+  background: #171b21;
   border-color: rgba(255, 255, 255, 0.08);
 }
 
@@ -98,6 +104,8 @@ input:focus {
 }
 
 .inspector {
+  position: relative;
+  z-index: 5;
   border-left: 1px solid var(--line);
   overflow: auto;
   overscroll-behavior: contain;
@@ -154,6 +162,35 @@ h1 {
 .wide,
 .search {
   width: 100%;
+}
+
+.kind-filter {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.kind-filter label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid #303947;
+  border-radius: 6px;
+  background: #12171f;
+  color: #cbd7e4;
+  font-size: 12px;
+}
+
+.kind-filter input {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  padding: 0;
+  accent-color: var(--cyan);
 }
 
 .stats {
@@ -214,8 +251,9 @@ h1 {
 }
 
 .node-row {
+  position: relative;
   display: grid;
-  grid-template-columns: 8px 1fr auto;
+  grid-template-columns: 8px minmax(0, 1fr);
   gap: 9px;
   align-items: center;
   width: 100%;
@@ -226,6 +264,18 @@ h1 {
   background: #12171f;
   color: var(--text);
   text-align: left;
+}
+
+.node-row > span:not(.swatch) {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.node-row strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .node-row:hover,
@@ -248,6 +298,11 @@ h1 {
 }
 
 .collapse-toggle {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 2;
+  transform: translateY(-50%);
   width: 28px;
   min-height: 28px;
   padding: 0;
@@ -255,9 +310,12 @@ h1 {
 
 .stage {
   position: relative;
+  z-index: 1;
   display: grid;
   grid-template-rows: auto 1fr;
   min-width: 0;
+  overflow: hidden;
+  contain: paint;
 }
 
 .stage-top {
@@ -293,6 +351,7 @@ h1 {
 .graph {
   position: relative;
   overflow: hidden;
+  contain: strict;
   perspective: 1000px;
   cursor: default;
   background-image:
@@ -309,6 +368,8 @@ h1 {
 #nodes {
   position: absolute;
   inset: 0;
+  overflow: hidden;
+  contain: paint;
 }
 
 #edges {
@@ -369,6 +430,23 @@ h1 {
   transform-style: preserve-3d;
   transform-origin: top left;
   user-select: none;
+}
+
+.node-collapse-toggle {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-color: rgba(90, 169, 230, 0.5);
+  background: rgba(32, 38, 47, 0.95);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  z-index: 2;
 }
 
 .node:active {
@@ -449,6 +527,12 @@ h1 {
 .kind-function {
   background: var(--blue);
   color: var(--blue);
+}
+
+.method,
+.kind-method {
+  background: #8fd3ff;
+  color: #8fd3ff;
 }
 
 .import,

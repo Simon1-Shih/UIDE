@@ -1,6 +1,6 @@
-# 3DE Pywebview Prototype
+# UIDE Pywebview Prototype
 
-3DE is a visual IDE prototype for understanding unfamiliar codebases through an object/data-flow graph instead of file-by-file keyword chasing.
+UIDE is a visual IDE prototype for understanding unfamiliar codebases through an object/data-flow graph instead of file-by-file keyword chasing.
 
 This first version uses:
 
@@ -60,4 +60,4 @@ Use `--debug` only when you need pywebview developer debugging:
 - Add a real code preview panel
 - Add LSP-powered symbol references
 - Add AI summaries for selected graph neighborhoods
-- Persist `.3degraph.json` project maps
+- Persist `.uidegraph.json` project maps

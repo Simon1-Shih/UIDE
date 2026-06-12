@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>3DE</title>
+    <title>UIDE</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -12,22 +12,29 @@
         <div class="brand">
           <div class="mark">3D</div>
           <div>
-            <h1>3DE</h1>
+            <h1>UIDE</h1>
             <p>Visual OOP Code Atlas</p>
           </div>
         </div>
 
-        <label class="path-label" for="pathInput">Project Folder</label>
+        <label class="path-label" for="pathInput">Project Directory</label>
         <div class="path-row">
           <input id="pathInput" type="text" />
-          <button id="scanButton" title="Scan folder">Scan</button>
+          <button id="scanButton" title="Scan directory">Scan</button>
         </div>
-        <button id="chooseButton" class="wide" title="Choose folder">Choose Folder</button>
+        <button id="chooseButton" class="wide" title="Choose directory">Choose Directory</button>
 
         <div class="stats" id="stats"></div>
 
         <label class="path-label" for="searchInput">Search Nodes</label>
         <input id="searchInput" class="search" type="search" placeholder="Class, function, file..." />
+
+        <div class="kind-filter" aria-label="Visible node types">
+          <label><input type="checkbox" data-kind-filter="import" checked />Import</label>
+          <label><input type="checkbox" data-kind-filter="class" checked />Class</label>
+          <label><input type="checkbox" data-kind-filter="function" checked />Function</label>
+          <label><input type="checkbox" data-kind-filter="method" checked />Method</label>
+        </div>
 
         <div class="toolbar">
           <button id="fitButton" title="Reset graph view">Reset</button>
@@ -51,6 +58,7 @@
             <span><i class="dot module"></i>Module</span>
             <span><i class="dot class"></i>Class</span>
             <span><i class="dot function"></i>Function</span>
+            <span><i class="dot method"></i>Method</span>
             <span><i class="dot import"></i>Import</span>
           </div>
         </div>

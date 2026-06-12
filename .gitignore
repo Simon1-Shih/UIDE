@@ -1,5 +1,5 @@
 __pycache__/
 *.py[cod]
-.3degraph.json
-.3de_cache/
-.3de_config.json
+.uidegraph.json
+.uide_cache/
+.uide_config.json

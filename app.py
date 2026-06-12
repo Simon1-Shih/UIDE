@@ -5,7 +5,9 @@ import re
 import sys
 import traceback
 import importlib.util
+import inspect
 import ast
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +48,7 @@ IGNORED_DIRS = {
 SUPPORTED_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx"}
 MAX_SCAN_FILES = 600
 MAX_FILE_BYTES = 512_000
+CACHE_VERSION = 3
 
 
 @dataclass
@@ -81,7 +84,7 @@ class GraphBuilder:
 
 class CodeScanner:
     def __init__(self) -> None:
-        self.cache_dir = ROOT / ".3de_cache"
+        self.cache_dir = ROOT / ".uide_cache"
         self.cache_file = self.cache_dir / "cache.json"
         self.cache_data = self._load_cache()
 
@@ -135,7 +138,7 @@ class CodeScanner:
                 size = 0
 
             cached = self.cache_data.get(path_str)
-            if cached and cached.get("mtime") == mtime and cached.get("size") == size:
+            if cached and cached.get("version") == CACHE_VERSION and cached.get("mtime") == mtime and cached.get("size") == size:
                 symbols = cached["symbols"]
                 imports = cached["imports"]
                 words = set(cached["words"])
@@ -149,6 +152,7 @@ class CodeScanner:
                 self.cache_data[path_str] = {
                     "mtime": mtime,
                     "size": size,
+                    "version": CACHE_VERSION,
                     "symbols": symbols,
                     "imports": imports,
                     "words": list(words)
@@ -162,8 +166,12 @@ class CodeScanner:
             parent_id = self._folder_node(builder, project_id, root, file_path)
             builder.edge(parent_id, file_id, "contains", "contains")
 
+            class_ids: dict[str, str] = {}
             for symbol in symbols:
-                symbol_id = f"{symbol['kind']}:{rel}:{symbol['name']}"
+                owner_prefix = f"{symbol.get('ownerClass')}." if symbol.get("ownerClass") else ""
+                symbol_id = f"{symbol['kind']}:{rel}:{owner_prefix}{symbol['name']}"
+                if symbol["kind"] == "class":
+                    class_ids[symbol["name"]] = symbol_id
                 builder.node(
                     symbol_id,
                     symbol["kind"],
@@ -172,8 +180,13 @@ class CodeScanner:
                     relpath=rel,
                     line=symbol["line"],
                     signature=symbol.get("signature", ""),
+                    params=symbol.get("params", []),
+                    ownerClass=symbol.get("ownerClass", ""),
+                    ownerParams=symbol.get("ownerParams", []),
+                    isMethod=symbol.get("isMethod", False),
                 )
-                builder.edge(file_id, symbol_id, "contains", "contains")
+                containing_node_id = class_ids.get(symbol.get("ownerClass", "")) or file_id
+                builder.edge(containing_node_id, symbol_id, "contains", "contains")
                 symbol_index.setdefault(symbol["name"], []).append(symbol_id)
 
             for import_name in imports:
@@ -192,8 +205,9 @@ class CodeScanner:
                 if not re.search(rf"\b{re.escape(name)}\s*\(", text):
                     continue
                 for target in targets:
-                    if target.startswith(f"class:{self._rel_from_file_id(file_id)}:") or target.startswith(
-                        f"function:{self._rel_from_file_id(file_id)}:"
+                    rel_from_id = self._rel_from_file_id(file_id)
+                    if target.startswith(f"class:{rel_from_id}:") or target.startswith(f"function:{rel_from_id}:") or target.startswith(
+                        f"method:{rel_from_id}:"
                     ):
                         continue
                     builder.edge(file_id, target, "calls", "calls")
@@ -268,6 +282,11 @@ class CodeScanner:
         return self._extract_js_symbols(text)
 
     def _extract_python_symbols(self, text: str) -> list[dict[str, Any]]:
+        try:
+            return self._extract_python_symbols_ast(text)
+        except SyntaxError:
+            pass
+
         symbols: list[dict[str, Any]] = []
         patterns = [
             ("class", re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\([^)]*\))?:", re.MULTILINE)),
@@ -288,6 +307,117 @@ class CodeScanner:
                     }
                 )
         return symbols
+
+    def _extract_python_symbols_ast(self, text: str) -> list[dict[str, Any]]:
+        tree = ast.parse(text)
+        class_params: dict[str, list[dict[str, Any]]] = {}
+        symbols: list[dict[str, Any]] = []
+
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                params = self._class_init_params(node)
+                class_params[node.name] = params
+                symbols.append(
+                    {
+                        "kind": "class",
+                        "name": node.name,
+                        "line": node.lineno,
+                        "signature": self._signature_text(node.name, params, include_self=False),
+                        "params": params,
+                        "ownerClass": "",
+                        "isMethod": False,
+                    }
+                )
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                params = self._function_params(node)
+                symbols.append(
+                    {
+                        "kind": "function",
+                        "name": node.name,
+                        "line": node.lineno,
+                        "signature": self._signature_text(node.name, params, include_self=True),
+                        "params": params,
+                        "ownerClass": "",
+                        "isMethod": False,
+                    }
+                )
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name != "__init__":
+                        params = self._function_params(item)
+                        symbols.append(
+                            {
+                                "kind": "method",
+                                "name": item.name,
+                                "line": item.lineno,
+                                "signature": self._signature_text(item.name, params, include_self=True),
+                                "params": params,
+                                "ownerClass": node.name,
+                                "ownerParams": class_params.get(node.name, []),
+                                "isMethod": True,
+                            }
+                        )
+        return symbols
+
+    def _class_init_params(self, class_node: ast.ClassDef) -> list[dict[str, Any]]:
+        for item in class_node.body:
+            if isinstance(item, ast.FunctionDef) and item.name == "__init__":
+                return self._function_params(item)
+        return []
+
+    def _function_params(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, Any]]:
+        params: list[dict[str, Any]] = []
+        positional = list(node.args.posonlyargs) + list(node.args.args)
+        defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+        for arg, default in zip(positional, defaults):
+            params.append(self._param_info(arg, default))
+        if node.args.vararg:
+            params.append(self._param_info(node.args.vararg, None, prefix="*"))
+        kw_defaults = list(node.args.kw_defaults)
+        for arg, default in zip(node.args.kwonlyargs, kw_defaults):
+            params.append(self._param_info(arg, default, keyword_only=True))
+        if node.args.kwarg:
+            params.append(self._param_info(node.args.kwarg, None, prefix="**"))
+        return params
+
+    def _param_info(
+        self,
+        arg: ast.arg,
+        default: ast.AST | None,
+        prefix: str = "",
+        keyword_only: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "name": f"{prefix}{arg.arg}",
+            "type": self._annotation_text(arg.annotation),
+            "default": self._default_text(default),
+            "required": default is None,
+            "keywordOnly": keyword_only,
+        }
+
+    def _default_text(self, default: ast.AST | None) -> str:
+        if default is None:
+            return ""
+        try:
+            return ast.unparse(default)
+        except Exception:
+            return "..."
+
+    def _signature_text(self, name: str, params: list[dict[str, Any]], include_self: bool) -> str:
+        parts = []
+        for param in params:
+            param_name = param["name"]
+            if not include_self and param_name in {"self", "cls"}:
+                continue
+            item = param_name
+            if param.get("type"):
+                item += f": {param['type']}"
+            if param.get("default"):
+                item += f" = {param['default']}"
+            parts.append(item)
+        return f"{name}({', '.join(parts)})"
 
     def _class_init_signature(self, text: str, class_name: str) -> str:
         try:
@@ -362,11 +492,11 @@ class CodeScanner:
 class Api:
     def __init__(self, initial_project_path: str | None = None) -> None:
         self.scanner = CodeScanner()
-        self.config_file = ROOT / ".3de_config.json"
+        self.config_file = ROOT / ".uide_config.json"
         self.config = self._load_config()
 
         # Clean up old txt config if it exists
-        old_txt = ROOT / ".3de_last_project.txt"
+        old_txt = ROOT / ".uide_last_project.txt"
         if old_txt.exists():
             try:
                 old_txt.unlink()
@@ -430,7 +560,7 @@ class Api:
 
     def save_graph(self, graph: dict[str, Any], path: str | None = None) -> dict[str, Any]:
         try:
-            target = Path(path or ROOT / ".3degraph.json")
+            target = Path(path or ROOT / ".uidegraph.json")
             target.write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
             return {"ok": True, "path": str(target)}
         except Exception as exc:
@@ -443,38 +573,64 @@ class Api:
             symbol_name = str(request["symbolName"])
             kind = str(request.get("kind", "function"))
             args = request.get("args", {})
+            owner_args = request.get("ownerArgs", {})
+            owner_class = str(request.get("ownerClass", ""))
             file_path = (project_root / relpath).resolve()
-            if not str(file_path).startswith(str(project_root)):
+            try:
+                file_path.relative_to(project_root)
+            except ValueError:
                 raise ValueError("Refusing to execute outside the scanned project.")
             if file_path.suffix != ".py":
                 raise ValueError("Quick Mock execution currently supports Python files only.")
             if not file_path.exists():
                 raise ValueError(f"Python file does not exist: {file_path}")
 
-            target = None
-            load_error: Exception | None = None
+            previous_cwd = Path.cwd()
+            os.chdir(project_root)
             try:
-                module = self._load_python_module(project_root, file_path)
-                target = getattr(module, symbol_name, None)
+                target = None
+                module = None
+                load_error: Exception | None = None
+                try:
+                    module = self._load_python_module(project_root, file_path)
+                    target = getattr(module, symbol_name, None)
+                    if target is None:
+                        target = self._find_class_member(module, symbol_name)
+                except ModuleNotFoundError as exc:
+                    load_error = exc
+                    target = self._load_isolated_python_symbol(file_path, symbol_name)
                 if target is None:
-                    target = self._find_class_member(module, symbol_name)
-            except ModuleNotFoundError as exc:
-                load_error = exc
-                target = self._load_isolated_python_symbol(file_path, symbol_name)
-            if target is None:
-                detail = f" Load failed first: {load_error}" if load_error else ""
-                raise ValueError(f"{symbol_name} is not a top-level symbol or class member in {relpath}.{detail}")
-            kwargs = {name: self._coerce_mock_value(value.get("value"), value.get("type", "")) for name, value in args.items()}
-            if kind == "class":
-                result = target(**kwargs)
-            else:
-                result = target(**kwargs)
+                    detail = f" Load failed first: {load_error}" if load_error else ""
+                    raise ValueError(f"{symbol_name} is not a top-level symbol or class member in {relpath}.{detail}")
+                if owner_class and kind in {"function", "method"}:
+                    owner = getattr(module, owner_class, None) if module else None
+                    if owner is None:
+                        owner = self._load_isolated_python_symbol(file_path, owner_class)
+                    if not isinstance(owner, type):
+                        raise ValueError(f"Cannot build self because {owner_class} is not available as a class.")
+                    owner_kwargs = {
+                        name: self._coerce_mock_value(value.get("value"), value.get("type", ""), module)
+                        for name, value in owner_args.items()
+                    }
+                    target = getattr(owner(**owner_kwargs), symbol_name)
+
+                kwargs = {
+                    name: self._coerce_mock_value(value.get("value"), value.get("type", ""), module)
+                    for name, value in args.items()
+                    if name not in {"self", "cls"}
+                }
+                if kind == "class":
+                    result = target(**kwargs)
+                else:
+                    result = target(**kwargs)
+            finally:
+                os.chdir(previous_cwd)
             return {"ok": True, "result": repr(result), "resultType": type(result).__name__}
         except Exception as exc:
             return {"ok": False, "error": f"{exc}\n{traceback.format_exc()}"}
 
     def _load_python_module(self, project_root: Path, file_path: Path):
-        module_name = f"_threede_mock_{abs(hash(str(file_path)))}"
+        module_name = f"_uide_mock_{abs(hash(str(file_path)))}"
         added_paths = []
         for candidate in (project_root, project_root.parent):
             candidate_text = str(candidate)
@@ -505,7 +661,7 @@ class Api:
         tree = ast.parse(file_path.read_text(encoding="utf-8", errors="ignore"))
         namespace: dict[str, Any] = {
             "__builtins__": __builtins__,
-            "__name__": "_threede_isolated_mock",
+            "__name__": "_uide_isolated_mock",
             "subprocess": __import__("subprocess"),
             "time": __import__("time"),
         }
@@ -514,6 +670,9 @@ class Api:
                 exec(compile(ast.Module(body=[node], type_ignores=[]), str(file_path), "exec"), namespace)
                 return namespace.get(symbol_name)
             if isinstance(node, ast.ClassDef):
+                if node.name == symbol_name:
+                    exec(compile(ast.Module(body=[node], type_ignores=[]), str(file_path), "exec"), namespace)
+                    return namespace.get(symbol_name)
                 method_names = {item.name for item in node.body if isinstance(item, ast.FunctionDef)}
                 if symbol_name in method_names:
                     exec(compile(ast.Module(body=[node], type_ignores=[]), str(file_path), "exec"), namespace)
@@ -521,7 +680,7 @@ class Api:
                     return getattr(cls, symbol_name, None)
         return None
 
-    def _coerce_mock_value(self, value: Any, type_hint: str) -> Any:
+    def _coerce_mock_value(self, value: Any, type_hint: str, module: Any | None = None) -> Any:
         text = "" if value is None else str(value)
         hint = type_hint.lower()
         if "int" in hint:
@@ -531,8 +690,38 @@ class Api:
         if "bool" in hint:
             return text.lower() in {"1", "true", "yes", "y", "on"}
         if "list" in hint or "dict" in hint or text.startswith(("[", "{")):
-            return json.loads(text)
+            parsed = json.loads(text)
+            if "dict" in hint or not type_hint or isinstance(parsed, list):
+                return parsed
+            return self._coerce_custom_object(parsed, type_hint, module)
         return text
+
+    def _coerce_custom_object(self, value: Any, type_hint: str, module: Any | None) -> Any:
+        if not isinstance(value, dict) or module is None:
+            return value
+        class_name = self._mock_class_name(type_hint)
+        cls = getattr(module, class_name, None)
+        if not isinstance(cls, type):
+            return value
+        signature = inspect.signature(cls)
+        kwargs = {}
+        for name, param in signature.parameters.items():
+            if name in {"self", "cls"} or name not in value:
+                continue
+            annotation = "" if param.annotation is inspect._empty else getattr(param.annotation, "__name__", str(param.annotation))
+            kwargs[name] = self._coerce_mock_value(value[name], annotation, module)
+        return cls(**kwargs)
+
+    def _mock_class_name(self, type_hint: str) -> str:
+        name = type_hint.strip().strip("'\"")
+        optional_match = re.match(r"(?:typing\.)?Optional\[(.+)\]$", name)
+        if optional_match:
+            name = optional_match.group(1)
+        if "|" in name:
+            name = next(part.strip() for part in name.split("|") if part.strip() not in {"None", "NoneType"})
+        if "[" in name:
+            name = name.split("[", 1)[0]
+        return name.split(".")[-1].strip()
 
 
 def main() -> int:
@@ -544,7 +733,7 @@ def main() -> int:
     api = Api(initial_project_path)
     html = WEB_DIR / "index.html"
     window = webview.create_window(
-        "3DE - Visual OOP Code Atlas",
+        "UIDE - Visual OOP Code Atlas",
         url=str(html),
         js_api=api,
         width=1440,
