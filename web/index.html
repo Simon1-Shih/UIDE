@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3DE</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">3D</div>
+          <div>
+            <h1>3DE</h1>
+            <p>Visual OOP Code Atlas</p>
+          </div>
+        </div>
+
+        <label class="path-label" for="pathInput">Project Folder</label>
+        <div class="path-row">
+          <input id="pathInput" type="text" />
+          <button id="scanButton" title="Scan folder">Scan</button>
+        </div>
+        <button id="chooseButton" class="wide" title="Choose folder">Choose Folder</button>
+
+        <div class="stats" id="stats"></div>
+
+        <label class="path-label" for="searchInput">Search Nodes</label>
+        <input id="searchInput" class="search" type="search" placeholder="Class, function, file..." />
+
+        <div class="toolbar">
+          <button id="fitButton" title="Reset graph view">Reset</button>
+          <button id="clearFocusButton" title="Clear selected node">Clear</button>
+        </div>
+
+        <div class="node-list" id="nodeList"></div>
+      </aside>
+
+      <div id="leftResizer" class="column-resizer" title="Resize left panel"></div>
+
+      <main class="stage">
+        <div class="stage-top">
+          <div>
+            <h2>Architecture Space</h2>
+            <p id="subtitle">Scan a project to generate a collapsible code graph.</p>
+          </div>
+          <div class="legend">
+            <span><i class="dot project"></i>Project</span>
+            <span><i class="dot folder"></i>Folder</span>
+            <span><i class="dot module"></i>Module</span>
+            <span><i class="dot class"></i>Class</span>
+            <span><i class="dot function"></i>Function</span>
+            <span><i class="dot import"></i>Import</span>
+          </div>
+        </div>
+        <section id="graph" class="graph">
+          <svg id="edges"></svg>
+          <div id="nodes"></div>
+        </section>
+      </main>
+
+      <div id="rightResizer" class="column-resizer" title="Resize right panel"></div>
+
+      <aside class="inspector">
+        <h2>Inspector</h2>
+        <div id="inspectorEmpty" class="empty">Select a neuron to inspect its role and relationships.</div>
+        <div id="inspectorBody" class="hidden">
+          <div class="node-card">
+            <span id="selectedKind" class="kind-pill"></span>
+            <h3 id="selectedName"></h3>
+            <p id="selectedPath"></p>
+          </div>
+
+          <div class="panel">
+            <h3>Outgoing</h3>
+            <div id="outgoing"></div>
+          </div>
+
+          <div class="panel">
+            <h3>Incoming</h3>
+            <div id="incoming"></div>
+          </div>
+
+          <div class="panel mock-panel">
+            <div class="panel-title-row">
+              <h3>Quick Mock</h3>
+              <button id="mockButton" title="Trace dependencies for a mock">Trace</button>
+            </div>
+            <div id="mockBody" class="mock-body"></div>
+          </div>
+
+          <div class="panel">
+            <h3>AI Context Seed</h3>
+            <pre id="contextSeed"></pre>
+          </div>
+        </div>
+      </aside>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
