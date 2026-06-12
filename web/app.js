@@ -47,6 +47,7 @@ const els = {
   mockBody: document.querySelector("#mockBody"),
   leftResizer: document.querySelector("#leftResizer"),
   rightResizer: document.querySelector("#rightResizer"),
+  copyContextButton: document.querySelector("#copyContextButton"),
   contextSeed: document.querySelector("#contextSeed"),
 };
 
@@ -238,13 +239,16 @@ function renderList() {
     .slice(0, 180)
     .map((n) => {
       const canCollapse = isCollapsibleNode(n);
-      const mark = state.collapsed.has(n.id) ? "+" : "-";
-      const title = n.kind === "folder" ? "Collapse folder" : n.kind === "class" ? "Collapse class" : "Collapse module";
+      const isCollapsed = state.collapsed.has(n.id);
+      const mark = isCollapsed ? "+" : "-";
+      const titleAction = isCollapsed ? "Expand" : "Collapse";
+      const title = `${titleAction} ${n.kind}`;
+      const collapseStateClass = isCollapsed ? "is-collapsed" : "is-expanded";
       return `
         <div class="node-row ${state.selectedId === n.id ? "active" : ""}" data-id="${n.id}" role="button" tabindex="0">
           <span class="swatch ${n.kind}"></span>
-          <span><strong>${escapeHtml(n.name)}</strong><small>${escapeHtml(n.kind)} - ${escapeHtml(n.metadata?.relpath || "")}</small></span>
-          ${canCollapse ? `<button class="collapse-toggle" data-collapse="${n.id}" title="${title}">${mark}</button>` : "<span></span>"}
+          <span class="node-row-label"><strong>${escapeHtml(n.name)}</strong><small>${escapeHtml(n.kind)} - ${escapeHtml(n.metadata?.relpath || "")}</small></span>
+          ${canCollapse ? `<button class="collapse-toggle ${collapseStateClass}" data-collapse="${n.id}" title="${title}">${mark}</button>` : `<span class="collapse-spacer"></span>`}
         </div>
       `;
     })
@@ -372,15 +376,31 @@ function renderNodes() {
     // order is now driven by z-index (set inline here).
     el.style.transform = `scale(${state.zoom})`;
     el.style.zIndex = String(depthFor(n.kind) * 10);
+    const isCollapsed = state.collapsed.has(n.id);
     const collapseButton = isCollapsibleNode(n)
-      ? `<button class="node-collapse-toggle" data-collapse="${escapeHtml(n.id)}" title="${state.collapsed.has(n.id) ? "Expand" : "Collapse"}">${state.collapsed.has(n.id) ? "+" : "-"}</button>`
+      ? `<button class="node-collapse-toggle ${isCollapsed ? "is-collapsed" : "is-expanded"}" data-collapse="${escapeHtml(n.id)}" title="${isCollapsed ? "Expand" : "Collapse"}">${isCollapsed ? "+" : "-"}</button>`
       : "";
     el.innerHTML = `
       <span class="node-orb kind-${n.kind}"></span>
-      <span><strong>${escapeHtml(n.name)}</strong><small>${escapeHtml(n.kind)}</small></span>
+      <span><span class="node-name"><strong>${escapeHtml(n.name)}</strong></span><small>${escapeHtml(n.kind)}</small></span>
       ${collapseButton}
     `;
     els.nodes.appendChild(el);
+    // If the rendered name is wider than the visible name slot, flag the
+    // node so CSS can switch the .node-name from ellipsis to a marquee
+    // while the node is focused. The --name-overflow CSS variable tells
+    // the @keyframes exactly how far to translate.
+    // Measure against the inner <strong> because .node-name itself has
+    // overflow:hidden, so its scrollWidth collapses back to its width.
+    const nameWrap = el.querySelector(".node-name");
+    const nameInner = nameWrap?.querySelector("strong");
+    if (nameWrap && nameInner) {
+      const overflow = nameInner.scrollWidth - nameWrap.clientWidth;
+      if (overflow > 1) {
+        nameWrap.classList.add("is-overflowing");
+        nameWrap.style.setProperty("--name-overflow", `${overflow}px`);
+      }
+    }
   }
 }
 
@@ -485,12 +505,17 @@ function renderMockPanel(selectedId) {
       `;
     })
     .join("");
+  const hasPrevStep = state.mock.step > 0;
+  const hasNextStep = state.mock.step < state.mock.steps.length - 1;
+  const mockControls = hasPrevStep || hasNextStep
+    ? [
+        hasPrevStep ? `<button id="mockPrevButton">Prev</button>` : `<span class="mock-control-spacer"></span>`,
+        hasNextStep ? `<button id="mockNextButton">Next</button>` : `<span class="mock-control-spacer"></span>`,
+      ].join("")
+    : "";
   els.mockBody.innerHTML = `
     <div class="mock-summary">${escapeHtml(state.mock.summary)}</div>
-    <div class="mock-controls">
-      <button id="mockPrevButton">Prev</button>
-      <button id="mockNextButton">Next</button>
-    </div>
+    ${mockControls ? `<div class="mock-controls">${mockControls}</div>` : ""}
     ${steps}
   `;
 }
@@ -970,18 +995,33 @@ function stepMock(delta) {
   render();
 }
 
+function clearFocus() {
+  state.selectedId = null;
+  state.mock = null;
+  render();
+}
+
+async function nextMockStep() {
+  if (!state.mock) return;
+  const currentStep = state.mock.step;
+  const result = await runMockStep(currentStep);
+  if (result?.ok && state.mock?.step === currentStep) {
+    stepMock(1);
+  }
+}
+
 async function runMockStep(index) {
   if (!state.mock) return;
   const step = state.mock.steps[index];
   if (!step?.node) {
     step.result = { ok: false, text: "This step is not available." };
     render();
-    return;
+    return step.result;
   }
   if (!step.node.metadata?.relpath?.endsWith(".py")) {
     step.result = { ok: false, text: "Quick Mock execution currently supports Python files only." };
     render();
-    return;
+    return step.result;
   }
   const inputs = document.querySelectorAll(`[data-mock-param]`);
   step.values = {};
@@ -999,21 +1039,21 @@ async function runMockStep(index) {
   if (missing.length) {
     step.result = { ok: false, text: `Prepare first: ${missing.join(", ")}` };
     render();
-    return;
+    return step.result;
   }
 
   if (step.kind === "object") {
     state.mock.prepared[step.className] = materializePreparedObject(step);
     step.result = { ok: true, text: `${step.className} prepared.` };
     render();
-    return;
+    return step.result;
   }
 
-  if (!window.pywebview?.api) return;
+  if (!window.pywebview?.api) return step.result;
   if (!["function", "method", "class"].includes(step.node.kind)) {
     step.result = { ok: false, text: "This step is not directly executable. Select a Python class, method, or top-level function." };
     render();
-    return;
+    return step.result;
   }
 
   const args = materializeArgs(step.params, step.values, step.dependencies || []);
@@ -1033,6 +1073,7 @@ async function runMockStep(index) {
     ? { ok: true, text: `${result.resultType}: ${result.result}` }
     : { ok: false, text: result.error || "Execution failed." };
   render();
+  return step.result;
 }
 
 function materializeArgs(params, values, dependencies = []) {
@@ -1084,6 +1125,34 @@ function escapeHtml(value) {
   });
 }
 
+async function copyContextSeed() {
+  const text = els.contextSeed.textContent || "";
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const scratch = document.createElement("textarea");
+      scratch.value = text;
+      scratch.setAttribute("readonly", "");
+      scratch.style.position = "fixed";
+      scratch.style.opacity = "0";
+      document.body.appendChild(scratch);
+      scratch.select();
+      document.execCommand("copy");
+      scratch.remove();
+    }
+    const previousLabel = els.copyContextButton.getAttribute("aria-label");
+    els.copyContextButton.title = "Copied";
+    els.copyContextButton.setAttribute("aria-label", "Copied");
+    window.setTimeout(() => {
+      els.copyContextButton.title = "Copy AI context seed";
+      els.copyContextButton.setAttribute("aria-label", previousLabel || "Copy AI context seed");
+    }, 1200);
+  } catch (error) {
+    alert(error.message || "Copy failed.");
+  }
+}
+
 async function scanPath(path) {
   els.scanButton.textContent = "Scanning";
   els.scanButton.disabled = true;
@@ -1123,6 +1192,7 @@ async function scanPath(path) {
 }
 
 els.scanButton.addEventListener("click", () => scanPath(els.pathInput.value.trim() || null));
+els.copyContextButton.addEventListener("click", () => copyContextSeed());
 els.chooseButton.addEventListener("click", async () => {
   if (!window.pywebview?.api) {
     setGraph(sampleGraph);
@@ -1157,11 +1227,7 @@ els.fitButton.addEventListener("click", () => {
   layoutGraph();
   render();
 });
-els.clearFocusButton.addEventListener("click", () => {
-  state.selectedId = null;
-  state.mock = null;
-  render();
-});
+els.clearFocusButton.addEventListener("click", () => clearFocus());
 els.mockButton.addEventListener("click", () => startMockTrace());
 els.nodeList.addEventListener("wheel", (event) => {
   els.nodeList.scrollTop += event.deltaY;
@@ -1171,13 +1237,13 @@ els.nodeList.addEventListener("wheel", (event) => {
 els.leftResizer.addEventListener("pointerdown", (event) => startColumnResize(event, "left"));
 els.rightResizer.addEventListener("pointerdown", (event) => startColumnResize(event, "right"));
 
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
   if (event.target.closest("#mockPrevButton")) {
     stepMock(-1);
     return;
   }
   if (event.target.closest("#mockNextButton")) {
-    stepMock(1);
+    await nextMockStep();
     return;
   }
   const runStep = event.target.closest("[data-run-step]");
@@ -1204,6 +1270,11 @@ document.addEventListener("keydown", (event) => {
 
 els.graph.addEventListener("auxclick", (event) => {
   if (event.button === 1) event.preventDefault();
+});
+
+els.graph.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  clearFocus();
 });
 
 els.graph.addEventListener("pointerdown", (event) => {

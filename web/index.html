@@ -9,20 +9,24 @@
   <body>
     <div id="app">
       <aside class="sidebar">
-        <div class="brand">
-          <div class="mark">3D</div>
-          <div>
-            <h1>UIDE</h1>
-            <p>Visual OOP Code Atlas</p>
+        <div class="sidebar-top">
+          <div class="brand">
+            <div class="mark">3D</div>
+            <div>
+              <h1>UIDE</h1>
+              <p>Visual OOP Code Atlas</p>
+            </div>
           </div>
+          <button id="chooseButton" class="folder-button" title="Choose directory" aria-label="Choose directory">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2v-9.5a2 2 0 0 1 2-2Z"></path>
+              <path d="M2 10h20"></path>
+            </svg>
+          </button>
         </div>
 
-        <label class="path-label" for="pathInput">Project Directory</label>
-        <div class="path-row">
-          <input id="pathInput" type="text" />
-          <button id="scanButton" title="Scan directory">Scan</button>
-        </div>
-        <button id="chooseButton" class="wide" title="Choose directory">Choose Directory</button>
+        <input id="pathInput" class="hidden" type="text" />
+        <button id="scanButton" class="hidden" title="Scan directory">Scan</button>
 
         <div class="stats" id="stats"></div>
 
@@ -99,7 +103,15 @@
           </div>
 
           <div class="panel">
-            <h3>AI Context Seed</h3>
+            <div class="panel-title-row">
+              <h3>AI Context Seed</h3>
+              <button id="copyContextButton" class="icon-button" title="Copy AI context seed" aria-label="Copy AI context seed">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="9" y="9" width="10" height="10" rx="2"></rect>
+                  <path d="M5 15V7a2 2 0 0 1 2-2h8"></path>
+                </svg>
+              </button>
+            </div>
             <pre id="contextSeed"></pre>
           </div>
         </div>
