@@ -366,7 +366,12 @@ function renderNodes() {
     el.dataset.id = n.id;
     el.style.left = `${screenX(pos.x)}px`;
     el.style.top = `${screenY(pos.y)}px`;
-    el.style.transform = `translateZ(${depthFor(n.kind)}px) scale(${state.zoom})`;
+    // Scale is fine on its own (no 3D), but translateZ is dropped: combined
+    // with the parent perspective(1000px) it shifts the visual box away
+    // from the hit area, so cursor and node fall out of sync. Stacking
+    // order is now driven by z-index (set inline here).
+    el.style.transform = `scale(${state.zoom})`;
+    el.style.zIndex = String(depthFor(n.kind) * 10);
     const collapseButton = isCollapsibleNode(n)
       ? `<button class="node-collapse-toggle" data-collapse="${escapeHtml(n.id)}" title="${state.collapsed.has(n.id) ? "Expand" : "Collapse"}">${state.collapsed.has(n.id) ? "+" : "-"}</button>`
       : "";
