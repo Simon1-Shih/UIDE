@@ -80,6 +80,26 @@ class GraphBuilder:
 
 
 class CodeScanner:
+    def __init__(self) -> None:
+        self.cache_dir = ROOT / ".3de_cache"
+        self.cache_file = self.cache_dir / "cache.json"
+        self.cache_data = self._load_cache()
+
+    def _load_cache(self) -> dict[str, Any]:
+        if self.cache_file.exists():
+            try:
+                return json.loads(self.cache_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {}
+
+    def _save_cache(self) -> None:
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self.cache_file.write_text(json.dumps(self.cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     def scan(self, folder: str) -> dict[str, Any]:
         root = Path(folder).expanduser().resolve()
         if not root.exists() or not root.is_dir():
@@ -97,18 +117,50 @@ class CodeScanner:
         module_index = self._build_module_index(root, files)
         symbol_index: dict[str, list[str]] = {}
         file_text: dict[str, str] = {}
+        file_words: dict[str, set[str]] = {}
+
+        cache_updated = False
 
         for file_path in files:
             rel = file_path.relative_to(root).as_posix()
             file_id = f"file:{rel}"
-            text = self._read_text(file_path)
+
+            path_str = str(file_path)
+            try:
+                stat = file_path.stat()
+                mtime = stat.st_mtime
+                size = stat.st_size
+            except OSError:
+                mtime = 0
+                size = 0
+
+            cached = self.cache_data.get(path_str)
+            if cached and cached.get("mtime") == mtime and cached.get("size") == size:
+                symbols = cached["symbols"]
+                imports = cached["imports"]
+                words = set(cached["words"])
+                text = self._read_text(file_path)
+            else:
+                text = self._read_text(file_path)
+                symbols = self._extract_symbols(text, file_path.suffix)
+                imports = self._extract_imports(text, file_path.suffix)
+                words = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', text))
+
+                self.cache_data[path_str] = {
+                    "mtime": mtime,
+                    "size": size,
+                    "symbols": symbols,
+                    "imports": imports,
+                    "words": list(words)
+                }
+                cache_updated = True
+
             file_text[file_id] = text
+            file_words[file_id] = words
+
             builder.node(file_id, "module", file_path.name, path=str(file_path), relpath=rel)
             parent_id = self._folder_node(builder, project_id, root, file_path)
             builder.edge(parent_id, file_id, "contains", "contains")
-
-            symbols = self._extract_symbols(text, file_path.suffix)
-            imports = self._extract_imports(text, file_path.suffix)
 
             for symbol in symbols:
                 symbol_id = f"{symbol['kind']}:{rel}:{symbol['name']}"
@@ -133,7 +185,10 @@ class CodeScanner:
                     builder.edge(file_id, target_file_id, "imports", f"imports {import_name}")
 
         for file_id, text in file_text.items():
+            words = file_words[file_id]
             for name, targets in symbol_index.items():
+                if name not in words:
+                    continue
                 if not re.search(rf"\b{re.escape(name)}\s*\(", text):
                     continue
                 for target in targets:
@@ -142,6 +197,9 @@ class CodeScanner:
                     ):
                         continue
                     builder.edge(file_id, target, "calls", "calls")
+
+        if cache_updated:
+            self._save_cache()
 
         return {
             "root": str(root),
@@ -159,7 +217,11 @@ class CodeScanner:
     def _folder_node(self, builder: GraphBuilder, project_id: str, root: Path, file_path: Path) -> str:
         rel_parts = file_path.relative_to(root).parts
         if len(rel_parts) <= 1:
-            return project_id
+            folder_name = "./"
+            folder_id = "folder:."
+            builder.node(folder_id, "folder", folder_name, path=str(root), relpath=".")
+            builder.edge(project_id, folder_id, "contains", "contains")
+            return folder_id
         folder_name = rel_parts[0]
         folder_id = f"folder:{folder_name}"
         builder.node(folder_id, "folder", folder_name, path=str(root / folder_name), relpath=folder_name)
@@ -300,14 +362,61 @@ class CodeScanner:
 class Api:
     def __init__(self, initial_project_path: str | None = None) -> None:
         self.scanner = CodeScanner()
-        self.initial_project_path = initial_project_path or str(ROOT)
+        self.config_file = ROOT / ".3de_config.json"
+        self.config = self._load_config()
+
+        # Clean up old txt config if it exists
+        old_txt = ROOT / ".3de_last_project.txt"
+        if old_txt.exists():
+            try:
+                old_txt.unlink()
+            except Exception:
+                pass
+
+        saved_path = self.config.get("last_project")
+        self.initial_project_path = initial_project_path or saved_path or str(ROOT / "examples" / "three_layer_import")
         # Keep pywebview's native window private; public API fields are exposed to JavaScript.
         self._window = None
 
+    def _load_config(self) -> dict[str, Any]:
+        if self.config_file.exists():
+            try:
+                return json.loads(self.config_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {}
+
+    def _save_config(self) -> None:
+        try:
+            self.config_file.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def get_config(self) -> dict[str, Any]:
+        return self.config
+
+    def update_config(self, updates: dict[str, Any]) -> dict[str, Any]:
+        self.config.update(updates)
+        self._save_config()
+        return {"ok": True}
+
     def scan_project(self, path: str | None = None) -> dict[str, Any]:
         try:
-            target = path or self.initial_project_path
-            return {"ok": True, "graph": self.scanner.scan(target)}
+            target = path
+            if not target:
+                saved_path = self.config.get("last_project")
+                if saved_path and Path(saved_path).is_dir():
+                    target = saved_path
+            if not target:
+                target = self.initial_project_path
+
+            graph = self.scanner.scan(target)
+
+            # Save the successful path to config
+            self.config["last_project"] = target
+            self._save_config()
+
+            return {"ok": True, "graph": graph}
         except Exception as exc:
             return {"ok": False, "error": f"{exc}\n{traceback.format_exc()}"}
 

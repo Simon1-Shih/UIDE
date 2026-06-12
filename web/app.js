@@ -11,6 +11,7 @@ const state = {
   renderIds: new Set(),
   mock: null,
   resizing: null,
+  loadedConfig: null,
 };
 
 const MAX_RENDER_NODES = 360;
@@ -96,9 +97,16 @@ function setGraph(graph) {
   state.positions.clear();
   state.selectedId = null;
   state.collapsed.clear();
-  for (const node of graph.nodes) {
-    if (node.kind === "module") state.collapsed.add(node.id);
+
+  const savedCollapsed = state.loadedConfig?.collapsed_by_project?.[graph.root];
+  if (savedCollapsed) {
+    state.collapsed = new Set(savedCollapsed);
+  } else {
+    for (const node of graph.nodes) {
+      if (node.kind === "module") state.collapsed.add(node.id);
+    }
   }
+
   state.renderIds.clear();
   state.mock = null;
   state.pan = { x: 0, y: 0 };
@@ -140,14 +148,27 @@ function layoutGraph() {
 
 function visibleNodeIds() {
   if (!state.graph) return new Set();
-  return new Set(state.graph.nodes.filter((node) => !isNodeHiddenByCollapsedFile(node)).map((node) => node.id));
+  return new Set(state.graph.nodes.filter((node) => !isNodeHiddenByCollapse(node)).map((node) => node.id));
 }
 
-function isNodeHiddenByCollapsedFile(node) {
-  if (node.kind === "project" || node.kind === "module") return false;
+function isNodeHiddenByCollapse(node) {
+  if (node.kind === "project" || node.kind === "folder") return false;
   const relpath = node.metadata?.relpath;
   if (!relpath) return false;
-  return state.collapsed.has(`file:${relpath}`);
+
+  // Check if parent folder is collapsed
+  const parts = relpath.split('/');
+  const folderId = parts.length > 1 ? `folder:${parts[0]}` : "folder:.";
+  if (state.collapsed.has(folderId)) {
+    return true;
+  }
+
+  // If the node is not a module, check if its file is collapsed
+  if (node.kind !== "module") {
+    return state.collapsed.has(`file:${relpath}`);
+  }
+
+  return false;
 }
 
 function relatedIds(id) {
@@ -195,13 +216,14 @@ function renderList() {
     .filter((n) => !q || nodeSearchText(n).includes(q))
     .slice(0, 180)
     .map((n) => {
-      const canCollapse = n.kind === "module";
+      const canCollapse = n.kind === "module" || n.kind === "folder";
       const mark = state.collapsed.has(n.id) ? "+" : "-";
+      const title = n.kind === "folder" ? "Collapse folder" : "Collapse module";
       return `
         <div class="node-row ${state.selectedId === n.id ? "active" : ""}" data-id="${n.id}" role="button" tabindex="0">
           <span class="swatch ${n.kind}"></span>
           <span><strong>${escapeHtml(n.name)}</strong><small>${escapeHtml(n.kind)} - ${escapeHtml(n.metadata?.relpath || "")}</small></span>
-          ${canCollapse ? `<button class="collapse-toggle" data-collapse="${n.id}" title="Collapse module">${mark}</button>` : "<span></span>"}
+          ${canCollapse ? `<button class="collapse-toggle" data-collapse="${n.id}" title="${title}">${mark}</button>` : "<span></span>"}
         </div>
       `;
     })
@@ -528,29 +550,76 @@ function selectNode(id) {
   if (state.selectedId !== id) state.mock = null;
   state.selectedId = id;
   const node = findNode(id);
-  if (node?.kind === "module") {
-    toggleModule(id);
-    return;
+
+  let layoutNeeded = false;
+  if (node?.kind === "module" || node?.kind === "folder") {
+    toggleModule(id, true);
+    layoutNeeded = true;
   }
-  const expanded = expandContainingFile(node);
-  if (expanded) layoutGraph();
+
+  if (expandParents(node)) {
+    layoutNeeded = true;
+  }
+
+  if (layoutNeeded) {
+    layoutGraph();
+  }
   render();
 }
 
-function expandContainingFile(node) {
-  const relpath = node?.metadata?.relpath;
-  if (!relpath) return false;
-  const moduleId = `file:${relpath}`;
-  if (!state.collapsed.has(moduleId)) return false;
-  state.collapsed.delete(moduleId);
-  return true;
+function expandParents(node) {
+  if (!node) return false;
+  let changed = false;
+
+  const relpath = node.metadata?.relpath;
+  if (relpath) {
+    // If it's a class/function/import, check containing file
+    if (node.kind !== "module" && node.kind !== "folder") {
+      const moduleId = `file:${relpath}`;
+      if (state.collapsed.has(moduleId)) {
+        state.collapsed.delete(moduleId);
+        changed = true;
+      }
+    }
+    // Check containing folder
+    const parts = relpath.split('/');
+    const folderId = parts.length > 1 ? `folder:${parts[0]}` : "folder:.";
+    if (folderId !== node.id && state.collapsed.has(folderId)) {
+      state.collapsed.delete(folderId);
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveCollapsedConfig();
+  }
+  return changed;
 }
 
-function toggleModule(id) {
-  if (state.collapsed.has(id)) state.collapsed.delete(id);
-  else state.collapsed.add(id);
-  layoutGraph();
-  render();
+function toggleModule(id, skipRender = false) {
+  if (state.collapsed.has(id)) {
+    state.collapsed.delete(id);
+  } else {
+    state.collapsed.add(id);
+  }
+  saveCollapsedConfig();
+  if (!skipRender) {
+    layoutGraph();
+    render();
+  }
+}
+
+async function saveCollapsedConfig() {
+  if (!window.pywebview?.api || !state.graph) return;
+  const projectPath = state.graph.root;
+  const collapsedArray = Array.from(state.collapsed);
+
+  if (!state.loadedConfig) state.loadedConfig = {};
+  if (!state.loadedConfig.collapsed_by_project) state.loadedConfig.collapsed_by_project = {};
+  state.loadedConfig.collapsed_by_project[projectPath] = collapsedArray;
+
+  await window.pywebview.api.update_config({
+    collapsed_by_project: state.loadedConfig.collapsed_by_project
+  });
 }
 
 function startMockTrace() {
@@ -622,8 +691,24 @@ async function scanPath(path) {
   els.subtitle.textContent = "Scanning project...";
   try {
     if (window.pywebview?.api) {
+      // First, fetch config if we haven't already
+      if (!state.loadedConfig) {
+        state.loadedConfig = await window.pywebview.api.get_config();
+        // Apply width configs
+        if (state.loadedConfig.left_width) {
+          document.documentElement.style.setProperty("--left-width", `${state.loadedConfig.left_width}px`);
+        }
+        if (state.loadedConfig.right_width) {
+          document.documentElement.style.setProperty("--right-width", `${state.loadedConfig.right_width}px`);
+        }
+      }
+
       const result = await window.pywebview.api.scan_project(path);
       if (!result.ok) throw new Error(result.error);
+
+      // Sync last project to loadedConfig
+      state.loadedConfig.last_project = result.graph.root;
+
       setGraph(result.graph);
     } else {
       setGraph(sampleGraph);
@@ -774,6 +859,9 @@ els.nodes.addEventListener("pointermove", (event) => {
 });
 
 document.addEventListener("pointerup", () => {
+  if (state.resizing) {
+    saveLayoutConfig();
+  }
   state.dragging = null;
   state.panning = null;
   state.resizing = null;
@@ -781,6 +869,21 @@ document.addEventListener("pointerup", () => {
   els.leftResizer.classList.remove("active");
   els.rightResizer.classList.remove("active");
 });
+
+async function saveLayoutConfig() {
+  if (!window.pywebview?.api) return;
+  const leftWidth = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--left-width"));
+  const rightWidth = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--right-width"));
+
+  if (!state.loadedConfig) state.loadedConfig = {};
+  state.loadedConfig.left_width = leftWidth;
+  state.loadedConfig.right_width = rightWidth;
+
+  await window.pywebview.api.update_config({
+    left_width: leftWidth,
+    right_width: rightWidth
+  });
+}
 
 document.addEventListener("pointermove", (event) => {
   if (!state.resizing) return;
