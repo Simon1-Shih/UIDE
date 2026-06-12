@@ -403,7 +403,7 @@ h1 {
 }
 
 .edge.mock-pending {
-  stroke: rgba(96, 211, 148, 0.3);
+  stroke: rgba(96, 211, 148, 0.5);
   stroke-dasharray: 5 8;
 }
 
@@ -459,7 +459,19 @@ h1 {
 }
 
 .node.mock-node {
-  border-color: rgba(96, 211, 148, 0.75);
+  border-color: rgba(96, 211, 148, 0.8);
+  background: rgba(18, 40, 34, 0.95);
+  box-shadow: 0 0 0 1px rgba(96, 211, 148, 0.22), 0 18px 44px rgba(0, 0, 0, 0.35);
+}
+
+.node.mock-ready {
+  border-color: rgba(96, 211, 148, 0.95);
+}
+
+.node.mock-current {
+  border-color: var(--cyan);
+  background: rgba(20, 40, 48, 0.98);
+  box-shadow: 0 0 0 1px rgba(64, 215, 217, 0.72), 0 0 28px rgba(64, 215, 217, 0.22), 0 18px 44px rgba(0, 0, 0, 0.38);
 }
 
 .node.dim,

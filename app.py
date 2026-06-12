@@ -681,6 +681,12 @@ class Api:
         return None
 
     def _coerce_mock_value(self, value: Any, type_hint: str, module: Any | None = None) -> Any:
+        if isinstance(value, dict):
+            if "dict" in type_hint.lower() or not type_hint:
+                return value
+            return self._coerce_custom_object(value, type_hint, module)
+        if isinstance(value, list):
+            return value
         text = "" if value is None else str(value)
         hint = type_hint.lower()
         if "int" in hint:
