@@ -648,12 +648,13 @@ class Api:
                 self._mock_log(diagnostics, f"cwd restored to {previous_cwd}")
             return {
                 "ok": True,
-                "result": f"{repr(result)}\n\nDiagnostics:\n" + "\n".join(diagnostics),
+                "result": repr(result),
                 "resultType": type(result).__name__,
             }
         except Exception as exc:
             self._mock_log(diagnostics, f"error {type(exc).__name__}: {exc}")
-            return {"ok": False, "error": f"{exc}\n{traceback.format_exc()}\nDiagnostics:\n" + "\n".join(diagnostics)}
+            self._mock_log(diagnostics, traceback.format_exc())
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def _mock_log(self, diagnostics: list[str], message: str) -> None:
         diagnostics.append(message)
@@ -691,7 +692,7 @@ class Api:
         }
 
     def _load_python_module(self, project_root: Path, file_path: Path):
-        module_name = f"_uide_mock_{abs(hash(str(file_path)))}"
+        module_name = self._module_name_for_mock(project_root, file_path)
         added_paths = []
         for candidate in (project_root, project_root.parent):
             candidate_text = str(candidate)
@@ -703,14 +704,33 @@ class Api:
             if spec is None or spec.loader is None:
                 raise ValueError(f"Cannot load module from {file_path}")
             module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
             spec.loader.exec_module(module)
             return module
         finally:
+            sys.modules.pop(module_name, None)
             for path in added_paths:
                 try:
                     sys.path.remove(path)
                 except ValueError:
                     pass
+
+    def _module_name_for_mock(self, project_root: Path, file_path: Path) -> str:
+        try:
+            relative = file_path.relative_to(project_root).with_suffix("")
+        except ValueError:
+            return f"_uide_mock_{abs(hash(str(file_path)))}"
+        parts = list(relative.parts)
+        if not parts:
+            return f"_uide_mock_{abs(hash(str(file_path)))}"
+        package_parts: list[str] = []
+        current = project_root
+        for part in parts[:-1]:
+            current = current / part
+            if not (current / "__init__.py").exists():
+                return f"_uide_mock_{abs(hash(str(file_path)))}"
+            package_parts.append(part)
+        return ".".join([*package_parts, parts[-1]])
 
     def _find_class_member(self, module: Any, symbol_name: str) -> Any:
         for value in vars(module).values():
@@ -742,13 +762,15 @@ class Api:
         return None
 
     def _coerce_mock_value(self, value: Any, type_hint: str, module: Any | None = None) -> Any:
+        if value is None:
+            return None
         if isinstance(value, dict):
             if "dict" in type_hint.lower() or not type_hint:
                 return value
             return self._coerce_custom_object(value, type_hint, module)
         if isinstance(value, list):
             return value
-        text = "" if value is None else str(value)
+        text = str(value)
         hint = type_hint.lower()
         if "int" in hint:
             return int(text)

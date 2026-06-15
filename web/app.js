@@ -447,6 +447,7 @@ function renderNodes() {
   const mockNodeIds = new Set(state.mock?.steps.map((step) => step.nodeId) || []);
   const readyMockNodeIds = new Set((state.mock?.steps || []).slice(0, (state.mock?.step ?? -1) + 1).map((step) => step.nodeId));
   const currentMockNodeId = state.mock?.steps?.[state.mock.step]?.nodeId;
+  const mockBadgeCounts = mockCollapsedBadgeCounts(visible);
   els.nodes.innerHTML = "";
   for (const n of state.graph.nodes) {
     if (!state.renderIds.has(n.id)) continue;
@@ -475,10 +476,13 @@ function renderNodes() {
     const collapseButton = isCollapsibleNode(n)
       ? `<button class="node-collapse-toggle ${isCollapsed ? "is-collapsed" : "is-expanded"}" data-collapse="${escapeHtml(n.id)}" title="${isCollapsed ? "Expand" : "Collapse"}">${isCollapsed ? "+" : "-"}</button>`
       : "";
+    const mockBadgeCount = mockBadgeCounts.get(n.id) || 0;
+    const mockBadge = mockBadgeCount ? `<span class="mock-collapse-badge" title="${mockBadgeCount} hidden mock step${mockBadgeCount > 1 ? "s" : ""}">${mockBadgeCount}</span>` : "";
     el.innerHTML = `
       <span class="node-orb kind-${n.kind}"></span>
       <span><span class="node-name"><strong>${escapeHtml(n.name)}</strong></span><small>${escapeHtml(n.kind)}</small></span>
       ${collapseButton}
+      ${mockBadge}
     `;
     els.nodes.appendChild(el);
     // If the rendered name is wider than the visible name slot, flag the
@@ -529,9 +533,13 @@ function renderEdges() {
 
 function renderMockFlowEdges() {
   if (!state.mock?.steps?.length) return;
+  const visible = visibleNodeIds();
   for (let index = 1; index < state.mock.steps.length; index += 1) {
-    const source = centerOf(state.mock.steps[index - 1].nodeId);
-    const target = centerOf(state.mock.steps[index].nodeId);
+    const sourceId = visibleEndpointId(state.mock.steps[index - 1].nodeId, visible);
+    const targetId = visibleEndpointId(state.mock.steps[index].nodeId, visible);
+    if (!sourceId || !targetId || sourceId === targetId) continue;
+    const source = centerOf(sourceId);
+    const target = centerOf(targetId);
     if (!source || !target) continue;
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     const midX = (source.x + target.x) / 2;
@@ -643,15 +651,52 @@ function renderMockInputs(fields, scope) {
   return fields
     .map((param) => {
       const path = param.path || param.name;
-      const value = paramValuesForScope(scope)[path] ?? defaultValueFor(param.name, param.type);
+      const values = paramValuesForScope(scope) || {};
+      const typeChoices = paramTypeChoicesForScope(scope) || {};
+      const value = values[path] ?? defaultValueFor(param);
+      const selectedType = typeChoices[path] ?? "";
+      const effectiveType = selectedType || param.type;
+      const typePicker = param.type ? "" : renderMockTypePicker(scope, path, selectedType);
+      const valueControl = normalizeType(effectiveType).toLowerCase() === "bool"
+        ? renderMockBoolInput(scope, path, value)
+        : `<input data-mock-scope="${scope}" data-mock-param="${escapeHtml(path)}" value="${escapeHtml(value)}" />`;
       return `
         <label>
           <span>${escapeHtml(path)}${param.type ? `: ${escapeHtml(param.type)}` : ""}</span>
-          <input data-mock-scope="${scope}" data-mock-param="${escapeHtml(path)}" value="${escapeHtml(value)}" />
+          <div class="mock-input-row">
+            ${typePicker}
+            ${valueControl}
+          </div>
         </label>
       `;
     })
     .join("");
+}
+
+function renderMockTypePicker(scope, path, value) {
+  const options = [
+    ["", "auto"],
+    ["str", "str"],
+    ["int", "int"],
+    ["float", "float"],
+    ["bool", "bool"],
+    ["json", "json"],
+  ];
+  return `
+    <select class="mock-type-select" data-mock-scope="${scope}" data-mock-type-param="${escapeHtml(path)}" title="Mock value type">
+      ${options.map(([optionValue, label]) => `<option value="${optionValue}" ${value === optionValue ? "selected" : ""}>${label}</option>`).join("")}
+    </select>
+  `;
+}
+
+function renderMockBoolInput(scope, path, value) {
+  const normalized = String(value).toLowerCase() === "true" ? "true" : "false";
+  return `
+    <select data-mock-scope="${scope}" data-mock-param="${escapeHtml(path)}">
+      <option value="false" ${normalized === "false" ? "selected" : ""}>false</option>
+      <option value="true" ${normalized === "true" ? "selected" : ""}>true</option>
+    </select>
+  `;
 }
 
 function paramValuesForScope(scope) {
@@ -659,6 +704,13 @@ function paramValuesForScope(scope) {
   const step = state.mock.steps[state.mock.step];
   if (!step) return {};
   return scope === "owner" ? step.ownerValues : step.values;
+}
+
+function paramTypeChoicesForScope(scope) {
+  if (!state.mock) return {};
+  const step = state.mock.steps[state.mock.step];
+  if (!step) return {};
+  return scope === "owner" ? step.ownerTypeChoices : step.typeChoices;
 }
 
 function hasMockFields(step) {
@@ -714,19 +766,36 @@ function buildMockPlan(nodeId) {
     collectDependencySteps(param, steps, seen);
   }
 
-  const targetNode = selected.metadata?.ownerClass ? findClassNode(selected.metadata.ownerClass) || selected : selected;
-  const targetIsMethodOwner = selected.kind === "method" && targetNode?.kind === "class";
+  const ownerClassName = selected.metadata?.ownerClass || "";
+  const ownerClassNode = ownerClassName ? findClassNode(ownerClassName, selected.metadata?.relpath) : null;
+  const targetNode = ownerClassNode || selected;
+  const targetIsMethodOwner = selected.kind === "method" && Boolean(ownerClassName);
   if (targetIsMethodOwner) {
-    const ownerConstructorParams = mockParamsFor(targetNode);
+    const ownerConstructorParams = mockParamsFor(ownerClassNode).length
+      ? mockParamsFor(ownerClassNode)
+      : mockOwnerParamsFor(selected);
+    const prepareNode = ownerClassNode || {
+      ...selected,
+      id: `class:${selected.metadata?.relpath || ""}:${ownerClassName}`,
+      kind: "class",
+      name: ownerClassName,
+      metadata: {
+        ...selected.metadata,
+        ownerClass: "",
+        ownerParams: [],
+        isMethod: false,
+        params: ownerConstructorParams,
+      },
+    };
     steps.push({
       kind: "object",
-      className: targetNode.name,
-      nodeId: targetNode.id,
+      className: ownerClassName,
+      nodeId: prepareNode.id,
       targetNodeId: selected.id,
       edgeId: null,
-      node: targetNode,
-      title: `Prepare ${targetNode.name}`,
-      detail: `Fill constructor inputs for ${targetNode.name}.`,
+      node: prepareNode,
+      title: `Prepare ${ownerClassName}`,
+      detail: `Fill constructor inputs for ${ownerClassName}.`,
       params: primitiveParamsFor(ownerConstructorParams),
       dependencies: dependencyParamsFor(ownerConstructorParams),
       values: {},
@@ -738,12 +807,12 @@ function buildMockPlan(nodeId) {
       edgeId: null,
       node: selected,
       title: `Run ${selected.name}`,
-      detail: `Call ${targetNode.name}.${selected.name}().`,
+      detail: `Call ${ownerClassName}.${selected.name}().`,
       params: primitiveParamsFor(mockParamsFor(selected)),
       ownerParams: primitiveParamsFor(mockOwnerParamsFor(selected)),
       ownerDependencies: dependencyParamsFor(mockOwnerParamsFor(selected)),
       dependencies: dependencyParamsFor(mockParamsFor(selected)),
-      requires: [targetNode.name],
+      requires: [ownerClassName],
       values: {},
       ownerValues: {},
       result: null,
@@ -869,9 +938,16 @@ function dependencyParamsFor(params) {
     .filter((param) => param.classNode && !isPrimitiveType(param.type));
 }
 
-function findClassNode(type) {
+function findClassNode(type, relpath = "") {
   if (!type || !state.graph) return null;
-  return state.graph.nodes.find((node) => node.kind === "class" && node.name === type);
+  const className = normalizeType(type);
+  if (relpath) {
+    const sameFile = state.graph.nodes.find(
+      (node) => node.kind === "class" && node.name === className && node.metadata?.relpath === relpath
+    );
+    if (sameFile) return sameFile;
+  }
+  return state.graph.nodes.find((node) => node.kind === "class" && node.name === className);
 }
 
 function isMockableNode(node) {
@@ -918,10 +994,24 @@ function mockValueFor(name, type) {
   return `"mock-${name}"`;
 }
 
-function defaultValueFor(name, type) {
-  const value = mockValueFor(name, type);
+function defaultValueFor(paramOrName, type = "") {
+  const param = typeof paramOrName === "object" ? paramOrName : null;
+  if (param?.default) {
+    return defaultTextValue(param.default);
+  }
+  const name = param?.name || paramOrName;
+  const value = mockValueFor(name, param?.type || type);
   if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
   return value;
+}
+
+function defaultTextValue(value) {
+  const text = String(value ?? "");
+  if (text === "None" || text === "null") return "";
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    return text.slice(1, -1);
+  }
+  return text;
 }
 
 function findNode(id) {
@@ -936,6 +1026,31 @@ function buildContext(id) {
     nearbyNodes: state.graph.nodes.filter((n) => neighborhood.has(n.id) && isNodeKindVisible(n)),
     relationships: state.graph.edges.filter((e) => neighborhood.has(e.source) && neighborhood.has(e.target) && isEdgeKindVisible(e)),
   };
+}
+
+function visibleEndpointId(id, visible = visibleNodeIds()) {
+  let current = id;
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (visible.has(current) && state.positions.has(current)) return current;
+    current = parentNodeId(current);
+  }
+  return null;
+}
+
+function parentNodeId(id) {
+  return state.graph?.edges.find((edge) => edge.kind === "contains" && edge.target === id)?.source || null;
+}
+
+function mockCollapsedBadgeCounts(visible = visibleNodeIds()) {
+  const counts = new Map();
+  for (const step of state.mock?.steps || []) {
+    const endpointId = visibleEndpointId(step.nodeId, visible);
+    if (!endpointId || endpointId === step.nodeId) continue;
+    counts.set(endpointId, (counts.get(endpointId) || 0) + 1);
+  }
+  return counts;
 }
 
 function centerOf(id) {
@@ -1118,17 +1233,7 @@ async function runMockStep(index) {
     render();
     return step.result;
   }
-  const inputs = document.querySelectorAll(`[data-mock-param]`);
-  step.values = {};
-  step.ownerValues = {};
-  inputs.forEach((input) => {
-    const param = input.dataset.mockParam;
-    if (input.dataset.mockScope === "owner") {
-      step.ownerValues[param] = input.value;
-    } else {
-      step.values[param] = input.value;
-    }
-  });
+  captureCurrentMockInputs(step);
 
   const missing = missingPreparedDependencies(step);
   if (missing.length) {
@@ -1138,8 +1243,28 @@ async function runMockStep(index) {
   }
 
   if (step.kind === "object") {
-    state.mock.prepared[step.className] = materializePreparedObject(step);
-    step.result = { ok: true, text: `${step.className} prepared.` };
+    if (!window.pywebview?.api) return step.result;
+    const args = materializeArgs(step.params, step.values, step.dependencies || [], step.typeChoices || {});
+    step.result = { ok: true, text: "Preparing..." };
+    render();
+    const result = await window.pywebview.api.run_python_mock({
+      projectRoot: state.graph.root,
+      relpath: step.node.metadata.relpath,
+      symbolName: step.node.name,
+      kind: "class",
+      ownerClass: "",
+      args,
+      ownerArgs: {},
+    });
+    if (result.ok) {
+      state.mock.prepared[step.className] = materializePreparedObject(step);
+      if (!state.mock.preparedTypeChoices) state.mock.preparedTypeChoices = {};
+      state.mock.preparedTypeChoices[step.className] = { ...(step.typeChoices || {}) };
+      step.result = { ok: true, text: `${step.className} prepared.` };
+    } else {
+      delete state.mock.prepared[step.className];
+      step.result = { ok: false, text: result.error || "Preparation failed." };
+    }
     render();
     return step.result;
   }
@@ -1151,8 +1276,8 @@ async function runMockStep(index) {
     return step.result;
   }
 
-  const args = materializeArgs(step.params, step.values, step.dependencies || []);
-  const ownerArgs = materializeArgs(step.ownerParams || [], step.ownerValues, step.ownerDependencies || []);
+  const args = materializeArgs(step.params, step.values, step.dependencies || [], step.typeChoices || {});
+  const ownerArgs = ownerArgsForStep(step);
   step.result = { ok: true, text: "Running..." };
   render();
   const result = await window.pywebview.api.run_python_mock({
@@ -1171,12 +1296,47 @@ async function runMockStep(index) {
   return step.result;
 }
 
-function materializeArgs(params, values, dependencies = []) {
+function ownerArgsForStep(step) {
+  const ownerClass = step.node.metadata?.ownerClass;
+  const prepared = ownerClass ? state.mock?.prepared?.[ownerClass] : null;
+  if (prepared) {
+    const preparedTypeChoices = state.mock?.preparedTypeChoices?.[ownerClass] || {};
+    return materializeArgs(step.ownerParams || [], prepared, step.ownerDependencies || [], preparedTypeChoices);
+  }
+  return materializeArgs(step.ownerParams || [], step.ownerValues, step.ownerDependencies || [], step.ownerTypeChoices || {});
+}
+
+function captureCurrentMockInputs(step) {
+  const inputs = document.querySelectorAll(`[data-mock-param]`);
+  const typeInputs = document.querySelectorAll(`[data-mock-type-param]`);
+  step.values = {};
+  step.ownerValues = {};
+  step.typeChoices = {};
+  step.ownerTypeChoices = {};
+  inputs.forEach((input) => {
+    const param = input.dataset.mockParam;
+    if (input.dataset.mockScope === "owner") {
+      step.ownerValues[param] = input.value;
+    } else {
+      step.values[param] = input.value;
+    }
+  });
+  typeInputs.forEach((input) => {
+    const param = input.dataset.mockTypeParam;
+    if (input.dataset.mockScope === "owner") {
+      step.ownerTypeChoices[param] = input.value;
+    } else {
+      step.typeChoices[param] = input.value;
+    }
+  });
+}
+
+function materializeArgs(params, values, dependencies = [], typeChoices = {}) {
   const args = {};
   for (const param of params || []) {
     args[param.name] = {
       value: materializeParamValue(param, values),
-      type: param.type,
+      type: materializeParamType(param, typeChoices),
     };
   }
   for (const param of dependencies) {
@@ -1190,7 +1350,16 @@ function materializeArgs(params, values, dependencies = []) {
 
 function materializeParamValue(param, values) {
   const path = param.path || param.name;
-  return values[path] ?? defaultValueFor(param.name, param.type);
+  const value = values[path] ?? defaultValueFor(param);
+  if (value === "" && param.default === "None") return null;
+  return value;
+}
+
+function materializeParamType(param, typeChoices = {}) {
+  const path = param.path || param.name;
+  if (typeChoices[path]) return typeChoices[path];
+  if (param.type === "json") return "";
+  return param.type;
 }
 
 function materializePreparedObject(step) {
@@ -1349,6 +1518,15 @@ document.addEventListener("click", async (event) => {
   }
   const target = event.target.closest("[data-id]");
   if (target) selectNode(target.dataset.id);
+});
+
+document.addEventListener("change", (event) => {
+  const typeSelect = event.target.closest?.("[data-mock-type-param]");
+  if (!typeSelect || !state.mock) return;
+  const step = state.mock.steps[state.mock.step];
+  if (!step) return;
+  captureCurrentMockInputs(step);
+  render();
 });
 
 document.addEventListener("keydown", (event) => {
