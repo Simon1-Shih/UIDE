@@ -778,12 +778,28 @@ class Api:
             return float(text)
         if "bool" in hint:
             return text.lower() in {"1", "true", "yes", "y", "on"}
+        if hint in {"import", "class", "instance"}:
+            return self._coerce_imported_mock_value(text, hint)
         if "list" in hint or "dict" in hint or text.startswith(("[", "{")):
             parsed = json.loads(text)
             if "dict" in hint or not type_hint or isinstance(parsed, list):
                 return parsed
             return self._coerce_custom_object(parsed, type_hint, module)
         return text
+
+    def _coerce_imported_mock_value(self, dotted_path: str, type_hint: str) -> Any:
+        module_name, _, attr_name = dotted_path.strip().rpartition(".")
+        if not module_name or not attr_name:
+            raise ValueError(f"{type_hint} mock value must be a dotted path like package.module.Name.")
+        imported_module = importlib.import_module(module_name)
+        value = getattr(imported_module, attr_name)
+        if type_hint == "import":
+            return value
+        if not isinstance(value, type):
+            raise TypeError(f"{dotted_path} is not a class.")
+        if type_hint == "class":
+            return value
+        return value()
 
     def _coerce_custom_object(self, value: Any, type_hint: str, module: Any | None) -> Any:
         if not isinstance(value, dict) or module is None:

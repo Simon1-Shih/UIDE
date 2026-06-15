@@ -241,6 +241,55 @@ const moreSteps = [
     assert.equal(world.backendResult.ok, true, world.backendResult.error);
     assert.equal(world.backendResult.result, "'relative-ok'");
   }],
+  [/^Given a backend mock target that accepts a strategy object$/, async () => {
+    world.backendProjectRoot = mkdtempSync(resolve(tmpdir(), "uide-bdd-"));
+    mkdirSync(resolve(world.backendProjectRoot, "backend"), { recursive: true });
+    writeFileSync(resolve(world.backendProjectRoot, "backend", "__init__.py"), "", "utf8");
+    writeFileSync(
+      resolve(world.backendProjectRoot, "backend", "strategies.py"),
+      [
+        "class FakeStrategy:",
+        "    def execute(self):",
+        "        return 'done'",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+    writeFileSync(
+      resolve(world.backendProjectRoot, "backend", "mock_target.py"),
+      [
+        "def use_strategy(strategy):",
+        "    return f'{strategy.__class__.__name__}:{strategy.execute()}'",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+  }],
+  [/^When I run the backend mock with strategy "(.+)" as instance$/, async (strategyPath) => {
+    const script = [
+      "from app import Api",
+      "import json",
+      "request = {",
+      `  'projectRoot': ${JSON.stringify(world.backendProjectRoot)},`,
+      "  'relpath': 'backend/mock_target.py',",
+      "  'symbolName': 'use_strategy',",
+      "  'kind': 'function',",
+      `  'args': {'strategy': {'value': ${JSON.stringify(strategyPath)}, 'type': 'instance'}},`,
+      "  'ownerArgs': {},",
+      "}",
+      "print(json.dumps(Api().run_python_mock(request), ensure_ascii=False))",
+    ].join("\n");
+    const result = spawnSync("python", ["-c", script], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    world.backendResult = JSON.parse(result.stdout);
+  }],
+  [/^Then the Python target receives FakeStrategy instance$/, async () => {
+    assert.equal(world.backendResult.ok, true, world.backendResult.error);
+    assert.equal(world.backendResult.result, "'FakeStrategy:done'");
+  }],
 ];
 
 steps.push(...moreSteps);

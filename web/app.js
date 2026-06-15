@@ -681,6 +681,9 @@ function renderMockTypePicker(scope, path, value) {
     ["float", "float"],
     ["bool", "bool"],
     ["json", "json"],
+    ["import", "import"],
+    ["class", "class"],
+    ["instance", "instance"],
   ];
   return `
     <select class="mock-type-select" data-mock-scope="${scope}" data-mock-type-param="${escapeHtml(path)}" title="Mock value type">

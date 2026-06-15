@@ -29,3 +29,8 @@ Feature: Quick Mock method owner preparation
     Given a backend mock target that imports a sibling module relatively
     When I run the backend mock target
     Then the Python target returns the relative import value
+
+  Scenario: Backend mock can pass an imported strategy instance
+    Given a backend mock target that accepts a strategy object
+    When I run the backend mock with strategy "backend.strategies.FakeStrategy" as instance
+    Then the Python target receives FakeStrategy instance
